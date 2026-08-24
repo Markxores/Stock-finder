@@ -1,0 +1,235 @@
+import yfinance as yf
+import pandas as pd
+import pysentiment2 as ps
+from datetime import datetime, timedelta
+
+# ============================================================
+# 1. RETAIL & MEDIA SENTIMENT (Loughran-McDonald)
+# ============================================================
+def calculate_news_sentiment(ticker_symbol, limit=15):
+    try:
+        asset = yf.Ticker(ticker_symbol)
+        news_items = asset.news
+        
+        if not news_items:
+            return None  # no news data available — distinct from a genuine neutral 0
+            
+        lm = ps.LM()
+        total_polarity = 0
+        count = 0
+        matched_headlines_count = 0
+        seen_headlines = set()
+        
+        for item in news_items[:limit]:
+            content = item.get('content', {})
+            title = content.get('title', '')
+            summary = content.get('summary', '')
+            text = f"{title}. {summary}".strip('. ')
+            text_lower = text.lower()
+            
+            if not text_lower:
+                continue  # skip if both title and summary were empty
+            
+            # Deduplication filter
+            if text_lower in seen_headlines:
+                continue
+            seen_headlines.add(text_lower)
+            
+            # Tokenize and score using pysentiment2
+            tokens = lm.tokenize(text)
+            score_dict = lm.get_score(tokens)
+            polarity = score_dict.get('Polarity', 0.0)
+            
+            if score_dict.get('Positive', 0) > 0 or score_dict.get('Negative', 0) > 0:
+                matched_headlines_count += 1
+            
+            total_polarity += polarity
+            count += 1
+            
+        if count > 0:
+            avg_polarity = total_polarity / count
+            
+            # Empirically Calibrated Multiplier (225x scaling) — PROVISIONAL,
+            # inherited from a different text source (Google News RSS titles).
+            # Needs recalibration now that this pulls title+summary from
+            # yfinance's asset.news feed — different text length/structure.
+            scaled_score = avg_polarity * 225.0
+            
+            # Density Safety Check: Scale down if under 15% of headlines had LM matches
+            density_ratio = matched_headlines_count / count
+            if density_ratio < 0.15:
+                scaled_score *= (density_ratio / 0.15)
+            
+            return max(-100, min(100, round(scaled_score, 1)))
+            
+        return None  # no usable text survived extraction/dedup — no usable data
+    except Exception:
+        return None  # a failure/exception is missing data, not a genuine 0 reading
+
+# ============================================================
+# 2. SMART MONEY FLOW (Options PCR & OI)
+# ============================================================
+def calculate_options_flow(ticker_symbol, min_oi_leg=30, min_vol_leg=20):
+    """
+    Aggregates options data across the front 3 expirations (broader
+    institutional positioning, not just the nearest date), and requires
+    BOTH the call and put side to individually clear a minimum liquidity
+    threshold before trusting either the OI-based or volume-based PCR —
+    prevents a near-empty leg (e.g. 232 puts vs 6 calls) from producing
+    a wildly unstable, misleading ratio.
+    """
+    try:
+        asset = yf.Ticker(ticker_symbol)
+        expirations = asset.options
+        if not expirations:
+            return None  # no options market — distinct from a genuine neutral 0
+
+        total_call_vol, total_put_vol = 0, 0
+        total_call_oi, total_put_oi = 0, 0
+
+        # Scan up to the front 3 expirations to capture broader positioning
+        for exp in expirations[:3]:
+            try:
+                chain = asset.option_chain(exp)
+                total_call_vol += chain.calls['volume'].fillna(0).sum()
+                total_put_vol += chain.puts['volume'].fillna(0).sum()
+                total_call_oi += chain.calls['openInterest'].fillna(0).sum()
+                total_put_oi += chain.puts['openInterest'].fillna(0).sum()
+            except Exception:
+                continue  # skip a single bad expiration, don't abort the whole function
+
+        if total_call_oi == 0 and total_call_vol == 0:
+            return None  # no usable liquidity at all — not a real reading
+
+        total_vol = total_call_vol + total_put_vol
+
+        # --- Per-leg liquidity checks: each side must independently clear a floor ---
+        oi_pcr = None
+        if total_call_oi >= min_oi_leg and total_put_oi >= min_oi_leg:
+            oi_pcr = total_put_oi / total_call_oi
+
+        vol_pcr = None
+        if total_call_vol >= min_vol_leg and total_put_vol >= min_vol_leg:
+            vol_pcr = total_put_vol / total_call_vol
+
+        # --- Determine blended PCR from whichever leg(s) passed the liquidity check ---
+        if total_vol < 1000:
+            blended_pcr = oi_pcr
+        elif vol_pcr is not None and oi_pcr is not None:
+            blended_pcr = (vol_pcr * 0.50) + (oi_pcr * 0.50)
+        elif oi_pcr is not None:
+            blended_pcr = oi_pcr
+        elif vol_pcr is not None:
+            blended_pcr = vol_pcr
+        else:
+            blended_pcr = None
+
+        if blended_pcr is None:
+            return None  # neither leg cleared the liquidity floor — not a trustworthy reading
+
+        neutral_baseline = 0.75  # calibrated against real single-stock PCR median (0.752)
+        dev_pcr = blended_pcr - neutral_baseline
+        raw_score = -(dev_pcr * 200.0)
+
+        return max(-100, min(100, round(raw_score, 1)))
+
+    except Exception:
+        return None  # a failure/exception is missing data, not a genuine 0 reading
+
+# ============================================================
+# 3. ANALYST CATALYST (Event Hype)
+# ============================================================
+def calculate_analyst_catalyst(ticker_symbol, days_back=14):
+    try:
+        asset = yf.Ticker(ticker_symbol)
+        recos = asset.upgrades_downgrades
+        
+        if recos is None or recos.empty:
+            return 0, "No Coverage"
+
+        cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=days_back)
+        
+        if recos.index.tz is None:
+            recos.index = recos.index.tz_localize('UTC')
+            
+        recent_actions = recos[recos.index >= cutoff_date]
+        
+        if recent_actions.empty:
+            return 0, "No Recent Actions"
+
+        score = 0
+        action_details = []
+
+        for index, row in recent_actions.iterrows():
+            action = str(row.get('Action', '')).lower()
+            to_grade = str(row.get('ToGrade', '')).lower()
+            
+            if action == 'up' or 'buy' in to_grade or 'outperform' in to_grade or 'overweight' in to_grade:
+                score += 50
+                action_details.append(f"Upgrade to {to_grade.title()}")
+            elif action == 'down' or 'sell' in to_grade or 'underperform' in to_grade or 'underweight' in to_grade:
+                score -= 50
+                action_details.append(f"Downgrade to {to_grade.title()}")
+            
+        final_catalyst_score = max(-100, min(100, score))
+        summary = " | ".join(action_details) if action_details else "Neutral Actions Only"
+        
+        return final_catalyst_score, summary
+
+    except Exception as e:
+        return 0, f"API Error: {str(e)}"
+
+# ============================================================
+# 4. MASTER SENTIMENT ENGINE
+# ============================================================
+def calculate_sentiment_score(ticker_symbol):
+    """
+    Blends Options Flow, News NLP, and Analyst Catalysts.
+    Dynamically redistributes weights around whichever pillars
+    actually have usable data — missing pillars are excluded
+    entirely, not silently treated as a neutral 0.
+    """
+    options_score = calculate_options_flow(ticker_symbol)
+    news_score = calculate_news_sentiment(ticker_symbol)
+    catalyst_score, catalyst_details = calculate_analyst_catalyst(ticker_symbol)
+
+    has_catalyst = catalyst_details not in ["No Coverage", "No Recent Actions", "Neutral Actions Only"] \
+                   and "API Error" not in catalyst_details
+
+    # Base weights when all three pillars are present
+    base_weights = {"options": 0.50, "news": 0.30, "catalyst": 0.20}
+
+    active_weights = {}
+    if options_score is not None:
+        active_weights["options"] = base_weights["options"]
+    if news_score is not None:
+        active_weights["news"] = base_weights["news"]
+    if has_catalyst:
+        active_weights["catalyst"] = base_weights["catalyst"]
+
+    if not active_weights:
+        # No pillar has usable data at all
+        details = {
+            "Smart Money (Options Flow)": "No Data",
+            "News NLP (Loughran-McDonald)": "No Data",
+            "Analyst Catalyst": "No Recent Actions",
+        }
+        return 0, details
+
+    # Redistribute weight proportionally across whichever pillars are active
+    total_active_weight = sum(active_weights.values())
+    master_score = 0
+    if "options" in active_weights:
+        master_score += options_score * (active_weights["options"] / total_active_weight)
+    if "news" in active_weights:
+        master_score += news_score * (active_weights["news"] / total_active_weight)
+    if "catalyst" in active_weights:
+        master_score += catalyst_score * (active_weights["catalyst"] / total_active_weight)
+
+    details = {
+        "Smart Money (Options Flow)": options_score if options_score is not None else "No Data",
+        "News NLP (Loughran-McDonald)": news_score if news_score is not None else "No Data",
+        "Analyst Catalyst": f"{catalyst_score} ({catalyst_details})" if has_catalyst else "No Recent Actions",
+    }
+
+    return max(-100, min(100, round(master_score, 1))), details

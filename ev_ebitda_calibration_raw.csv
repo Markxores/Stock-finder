@@ -1,0 +1,262 @@
+Ticker,Sector,EV_EBITDA
+AAPL,💻 Information Technology (XLK),27.01
+ABBV,🏥 Health Care (XLV),17.312
+ABNB,🛍️ Consumer Discretionary (XLY),36.529
+ABT,🏥 Health Care (XLV),19.656
+ADBE,💻 Information Technology (XLK),11.397
+ADI,💻 Information Technology (XLK),27.103
+ADP,🏭 Industrials (XLI),17.6
+AEE,💡 Utilities (XLU),13.122
+AEP,💡 Utilities (XLU),13.287
+AFRM,🏦 Financials (XLF),52.44
+ALB,⛏️ Materials (XLB),13.333
+AMAT,💻 Information Technology (XLK),38.288
+AMD,💻 Information Technology (XLK),79.872
+AMGN,🏥 Health Care (XLV),16.263
+AMT,🏢 Real Estate (XLRE),18.691
+AMZN,🛍️ Consumer Discretionary (XLY),17.277
+ANET,💻 Information Technology (XLK),48.406
+APD,⛏️ Materials (XLB),18.9
+APP,💻 Information Technology (XLK),18.982
+ARE,🏢 Real Estate (XLRE),14.388
+ARM,💻 Information Technology (XLK),241.104
+ASML,💻 Information Technology (XLK),2789.885
+AVB,🏢 Real Estate (XLRE),19.136
+AVGO,💻 Information Technology (XLK),42.729
+AVY,⛏️ Materials (XLB),11.583
+AXP,🏦 Financials (XLF),
+AZO,🛍️ Consumer Discretionary (XLY),14.331
+BA,🏭 Industrials (XLI),-68.409
+BAC,🏦 Financials (XLF),
+BALL,⛏️ Materials (XLB),11.529
+BDX,🏥 Health Care (XLV),11.174
+BKNG,🛍️ Consumer Discretionary (XLY),15.482
+BKR,🛢️ Energy (XLE),12.665
+BLK,🏦 Financials (XLF),16.838
+BRK-B,🏦 Financials (XLF),-1.79
+BSX,🏥 Health Care (XLV),14.94
+C,🏦 Financials (XLF),
+CAT,🏭 Industrials (XLI),25.83
+CB,🏦 Financials (XLF),10.352
+CBRE,🏢 Real Estate (XLRE),24.452
+CCI,🏢 Real Estate (XLRE),20.256
+CCL,🛍️ Consumer Discretionary (XLY),8.105
+CDNS,💻 Information Technology (XLK),41.27
+CE,⛏️ Materials (XLB),9.691
+CEG,💡 Utilities (XLU),15.22
+CF,⛏️ Materials (XLB),6.176
+CHTR,📡 Communication Services (XLC),5.458
+CL,🛒 Consumer Staples (XLP),15.922
+CMCSA,📡 Communication Services (XLC),5.23
+CME,🏦 Financials (XLF),21.058
+CMG,🛍️ Consumer Discretionary (XLY),22.609
+CNP,💡 Utilities (XLU),12.903
+COIN,🏦 Financials (XLF),67.304
+COP,🛢️ Energy (XLE),6.633
+COST,🛒 Consumer Staples (XLP),30.357
+CRM,💻 Information Technology (XLK),15.667
+CRWD,💻 Information Technology (XLK),3232.773
+CSCO,💻 Information Technology (XLK),24.273
+CSX,🏭 Industrials (XLI),16.634
+CTRA,🛢️ Energy (XLE),
+CTSH,💻 Information Technology (XLK),7.164
+CVX,🛢️ Energy (XLE),8.623
+D,💡 Utilities (XLU),14.134
+DD,⛏️ Materials (XLB),12.78
+DDOG,💻 Information Technology (XLK),975.881
+DE,🏭 Industrials (XLI),24.221
+DHI,🛍️ Consumer Discretionary (XLY),11.433
+DHR,🏥 Health Care (XLV),22.094
+DIS,📡 Communication Services (XLC),11.151
+DKNG,🛍️ Consumer Discretionary (XLY),113.361
+DLR,🏢 Real Estate (XLRE),28.517
+DOW,⛏️ Materials (XLB),10.112
+DTE,💡 Utilities (XLU),15.466
+DUK,💡 Utilities (XLU),11.318
+DVN,🛢️ Energy (XLE),7.278
+EA,📡 Communication Services (XLC),30.355
+ECL,⛏️ Materials (XLB),21.22
+ED,💡 Utilities (XLU),10.74
+EIX,💡 Utilities (XLU),8.118
+ELV,🏥 Health Care (XLV),9.675
+EMN,⛏️ Materials (XLB),9.564
+EMR,🏭 Industrials (XLI),16.401
+EOG,🛢️ Energy (XLE),5.769
+EQIX,🏢 Real Estate (XLRE),28.087
+EQR,🏢 Real Estate (XLRE),17.342
+EQT,🛢️ Energy (XLE),6.111
+ES,💡 Utilities (XLU),11.066
+ESS,🏢 Real Estate (XLRE),20.677
+ETN,🏭 Industrials (XLI),27.639
+EXC,💡 Utilities (XLU),11.496
+EXR,🏢 Real Estate (XLRE),19.758
+F,🛍️ Consumer Discretionary (XLY),25.994
+FANG,🛢️ Energy (XLE),6.557
+FCX,⛏️ Materials (XLB),13.447
+FDX,🏭 Industrials (XLI),8.975
+FE,💡 Utilities (XLU),10.514
+FMC,⛏️ Materials (XLB),19.794
+FTNT,💻 Information Technology (XLK),42.039
+GD,🏭 Industrials (XLI),16.427
+GE,🏭 Industrials (XLI),32.393
+GILD,🏥 Health Care (XLV),13.866
+GIS,🛒 Consumer Staples (XLP),7.083
+GM,🛍️ Consumer Discretionary (XLY),11.107
+GOOGL,📡 Communication Services (XLC),23.755
+GS,🏦 Financials (XLF),
+HAL,🛢️ Energy (XLE),8.61
+HCA,🏥 Health Care (XLV),9.321
+HD,🛍️ Consumer Discretionary (XLY),15.556
+HES,🛢️ Energy (XLE),
+HLT,🛍️ Consumer Discretionary (XLY),28.031
+HON,🏭 Industrials (XLI),11.103
+HOOD,🏦 Financials (XLF),
+HSY,🛒 Consumer Staples (XLP),15.651
+HUBS,💻 Information Technology (XLK),69.368
+IBKR,🏦 Financials (XLF),
+ICE,🏦 Financials (XLF),16.396
+INTC,💻 Information Technology (XLK),29.14
+INTU,💻 Information Technology (XLK),15.68
+IP,⛏️ Materials (XLB),7.918
+IRM,🏢 Real Estate (XLRE),22.131
+ISRG,🏥 Health Care (XLV),30.793
+ITW,🏭 Industrials (XLI),18.571
+JNJ,🏥 Health Care (XLV),19.486
+JPM,🏦 Financials (XLF),
+KDP,🛒 Consumer Staples (XLP),17.52
+KHC,🛒 Consumer Staples (XLP),8.516
+KLAC,💻 Information Technology (XLK),39.909
+KMB,🛒 Consumer Staples (XLP),12.083
+KMI,🛢️ Energy (XLE),13.434
+KO,🛒 Consumer Staples (XLP),24.827
+KR,🛒 Consumer Staples (XLP),8.353
+LIN,⛏️ Materials (XLB),18.045
+LLY,🏥 Health Care (XLV),27.932
+LMT,🏭 Industrials (XLI),15.167
+LNG,🛢️ Energy (XLE),11.429
+LOW,🛍️ Consumer Discretionary (XLY),12.479
+LRCX,💻 Information Technology (XLK),45.301
+LULU,🛍️ Consumer Discretionary (XLY),5.6
+LYV,📡 Communication Services (XLC),29.859
+MA,🏦 Financials (XLF),23.497
+MAA,🏢 Real Estate (XLRE),17.0
+MAR,🛍️ Consumer Discretionary (XLY),22.901
+MARA,💻 Information Technology (XLK),-3.456
+MCD,🛍️ Consumer Discretionary (XLY),16.445
+MCHP,💻 Information Technology (XLK),30.834
+MCO,🏦 Financials (XLF),23.052
+MDB,💻 Information Technology (XLK),-403.031
+MDLZ,🛒 Consumer Staples (XLP),16.884
+MDT,🏥 Health Care (XLV),13.86
+META,📡 Communication Services (XLC),12.976
+MMC,🏦 Financials (XLF),
+MMM,🏭 Industrials (XLI),15.444
+MNDY,💻 Information Technology (XLK),59.051
+MNST,🛒 Consumer Staples (XLP),30.783
+MO,🛒 Consumer Staples (XLP),8.41
+MOS,⛏️ Materials (XLB),7.98
+MPC,🛢️ Energy (XLE),8.733
+MRK,🏥 Health Care (XLV),14.658
+MRVL,💻 Information Technology (XLK),76.99
+MS,🏦 Financials (XLF),
+MSFT,💻 Information Technology (XLK),18.741
+MSTR,💻 Information Technology (XLK),-1.776
+MTCH,📡 Communication Services (XLC),10.485
+MU,💻 Information Technology (XLK),15.717
+NEE,💡 Utilities (XLU),20.067
+NEM,⛏️ Materials (XLB),7.938
+NET,💻 Information Technology (XLK),-48009.145
+NFLX,📡 Communication Services (XLC),23.015
+NKE,🛍️ Consumer Discretionary (XLY),12.677
+NOC,🏭 Industrials (XLI),12.822
+NOW,💻 Information Technology (XLK),47.159
+NUE,⛏️ Materials (XLB),10.709
+NVDA,💻 Information Technology (XLK),31.151
+NXPI,💻 Information Technology (XLK),12.824
+O,🏢 Real Estate (XLRE),17.243
+OKE,🛢️ Energy (XLE),11.974
+OMC,📡 Communication Services (XLC),8.981
+ON,💻 Information Technology (XLK),14.238
+ORCL,💻 Information Technology (XLK),18.461
+ORLY,🛍️ Consumer Discretionary (XLY),19.524
+OXY,🛢️ Energy (XLE),5.881
+PANW,💻 Information Technology (XLK),195.944
+PCG,💡 Utilities (XLU),9.98
+PEG,💡 Utilities (XLU),13.595
+PEP,🛒 Consumer Staples (XLP),12.631
+PFE,🏥 Health Care (XLV),8.355
+PG,🛒 Consumer Staples (XLP),14.64
+PGR,🏦 Financials (XLF),8.684
+PH,🏭 Industrials (XLI),23.748
+PINS,📡 Communication Services (XLC),41.615
+PLD,🏢 Real Estate (XLRE),25.544
+PLTR,💻 Information Technology (XLK),158.985
+PM,🛒 Consumer Staples (XLP),18.787
+PPG,⛏️ Materials (XLB),11.589
+PPL,💡 Utilities (XLU),12.215
+PSA,🏢 Real Estate (XLRE),20.661
+PSX,🛢️ Energy (XLE),11.544
+QCOM,💻 Information Technology (XLK),14.65
+RBLX,📡 Communication Services (XLC),-31.072
+REGN,🏥 Health Care (XLV),16.586
+RIOT,💻 Information Technology (XLK),-8.73
+ROKU,🛍️ Consumer Discretionary (XLY),36.773
+ROST,🛍️ Consumer Discretionary (XLY),19.537
+RTX,🏭 Industrials (XLI),19.832
+SBUX,🛍️ Consumer Discretionary (XLY),24.976
+SCHW,🏦 Financials (XLF),
+SHOP,💻 Information Technology (XLK),78.189
+SHW,⛏️ Materials (XLB),20.892
+SLB,🛢️ Energy (XLE),12.165
+SMCI,💻 Information Technology (XLK),10.22
+SNAP,📡 Communication Services (XLC),-71.288
+SNOW,💻 Information Technology (XLK),-102.212
+SNPS,💻 Information Technology (XLK),49.839
+SO,💡 Utilities (XLU),12.568
+SOFI,💻 Information Technology (XLK),
+SPG,🏢 Real Estate (XLRE),19.609
+SPGI,🏦 Financials (XLF),17.671
+SPOT,📡 Communication Services (XLC),38.466
+SQ,🏦 Financials (XLF),
+SRE,💡 Utilities (XLU),17.269
+STLD,⛏️ Materials (XLB),13.665
+STZ,🛒 Consumer Staples (XLP),9.808
+SUI,🏢 Real Estate (XLRE),18.41
+SYK,🏥 Health Care (XLV),18.755
+SYY,🛒 Consumer Staples (XLP),11.92
+T,📡 Communication Services (XLC),7.554
+TDG,🏭 Industrials (XLI),19.067
+TEAM,💻 Information Technology (XLK),99.647
+TGT,🛒 Consumer Staples (XLP),10.311
+TJX,🛍️ Consumer Discretionary (XLY),18.565
+TMO,🏥 Health Care (XLV),23.11
+TMUS,📡 Communication Services (XLC),9.134
+TSLA,🛍️ Consumer Discretionary (XLY),130.762
+TSM,💻 Information Technology (XLK),4.728
+TSN,🛒 Consumer Staples (XLP),10.081
+TTD,📡 Communication Services (XLC),7.367
+TTWO,📡 Communication Services (XLC),59.912
+TWLO,💻 Information Technology (XLK),66.045
+TXN,💻 Information Technology (XLK),26.101
+U,💻 Information Technology (XLK),142.923
+UNH,🏥 Health Care (XLV),14.974
+UNP,🏭 Industrials (XLI),16.459
+UPS,🏭 Industrials (XLI),9.217
+V,🏦 Financials (XLF),22.273
+VICI,🏢 Real Estate (XLRE),12.96
+VLO,🛢️ Energy (XLE),8.012
+VRTX,🏥 Health Care (XLV),26.083
+VTR,🏢 Real Estate (XLRE),25.628
+VZ,📡 Communication Services (XLC),7.803
+WBD,📡 Communication Services (XLC),13.018
+WDAY,💻 Information Technology (XLK),32.311
+WEC,💡 Utilities (XLU),14.616
+WELL,🏢 Real Estate (XLRE),57.301
+WFC,🏦 Financials (XLF),
+WM,🏭 Industrials (XLI),14.453
+WMB,🛢️ Energy (XLE),16.924
+WMT,🛒 Consumer Staples (XLP),18.995
+XEL,💡 Utilities (XLU),14.257
+XOM,🛢️ Energy (XLE),10.56
+ZS,💻 Information Technology (XLK),-455.934
+ZTS,🏥 Health Care (XLV),9.764
