@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-
-# IMPORTING SECTOR MAPPINGS
-from sector_map import TICKER_TRUE_SECTOR
+from yf_session import get_yf_session, with_retry
 
 # ============================================================
 # SECTOR ETF MAPPING
@@ -24,38 +22,37 @@ SECTOR_ETF_MAPPING = {
     "💡 Utilities (XLU)": "XLU",
 }
 
+from sector_map import TICKER_TRUE_SECTOR
+
 
 # ============================================================
 # DAILY TREND SCORE
 # ============================================================
 @st.cache_data(ttl=3600)
+@with_retry(max_retries=2, delay_seconds=2)
 def calculate_daily_trend_score(ticker_symbol):
     try:
-        asset = yf.Ticker(ticker_symbol)
+        session = get_yf_session()
+        asset = yf.Ticker(ticker_symbol, session=session)
         df = asset.history(period="1y")
         if df.empty or len(df) < 200:
             return 0, {"⚠️ STATUS": "Insufficient History"}
 
-        # --- NATIVE PANDAS TECHNICAL INDICATORS ---
-        # 1. Moving Averages
         df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
         df['SMA_50'] = df['Close'].rolling(window=50).mean()
         df['SMA_200'] = df['Close'].rolling(window=200).mean()
 
-        # 2. RSI (14-Period Wilder's Smoothing)
         delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         rs = gain / loss
         df['RSI_14'] = 100 - (100 / (1 + rs))
 
-        # 3. MACD (12, 26, 9)
         ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD_12_26_9'] = ema_12 - ema_26
         df['MACDs_12_26_9'] = df['MACD_12_26_9'].ewm(span=9, adjust=False).mean()
         df['MACDh_12_26_9'] = df['MACD_12_26_9'] - df['MACDs_12_26_9']
-        # ------------------------------------------
 
         current = df.iloc[-1]
         close = current['Close']
@@ -97,10 +94,12 @@ def calculate_daily_trend_score(ticker_symbol):
 # ============================================================
 # 4H DATA + INDICATORS
 # ============================================================
-@st.cache_data(ttl=1800)  # 30 min cache
+@st.cache_data(ttl=1800)
+@with_retry(max_retries=2, delay_seconds=2)
 def get_4h_indicators(ticker_symbol):
     try:
-        asset = yf.Ticker(ticker_symbol)
+        session = get_yf_session()
+        asset = yf.Ticker(ticker_symbol, session=session)
         df_1h = asset.history(period="60d", interval="1h")
         if df_1h.empty:
             return None
@@ -208,13 +207,13 @@ def calculate_4h_pullback_score(df4h, daily_direction):
 
 # ============================================================
 # SECTOR BENCHMARK SCORE
-# A lighter-weight trend read on the sector ETF itself, used as
-# a MODIFIER on the stock's own technical score, not a full vote.
 # ============================================================
 @st.cache_data(ttl=3600)
+@with_retry(max_retries=2, delay_seconds=2)
 def calculate_sector_score(sector_etf_ticker):
     try:
-        asset = yf.Ticker(sector_etf_ticker)
+        session = get_yf_session()
+        asset = yf.Ticker(sector_etf_ticker, session=session)
         df = asset.history(period="1y")
         if df.empty or len(df) < 200:
             return 0, {"⚠️ STATUS": "Insufficient Sector History"}
@@ -252,9 +251,6 @@ def calculate_sector_score(sector_etf_ticker):
 
 # ============================================================
 # MASTER COMBINED TECHNICAL ENGINE
-# Core: 70% Daily / 30% 4H Trigger
-# Sector ETF acts as a MODIFIER (±~10.5%) on top of the core score,
-# not an additional blended component.
 # ============================================================
 @st.cache_data(ttl=1800)
 def calculate_technical_score(ticker_symbol, category_name=None):
@@ -273,24 +269,17 @@ def calculate_technical_score(ticker_symbol, category_name=None):
             four_h_score = pullback_score
             active_mode = "Pullback"
 
-        # --- CORE SCORE: 70% Daily / 30% 4H Trigger ---
         core_score = (daily_score * 0.7) + (four_h_score * 0.3)
 
-        # --- SECTOR MODIFIER ---
-        sector_score = None
-        sector_details = {}
-        
-        # 1. Find the ticker's true sector string using our new mapping file
-        true_sector_name = TICKER_TRUE_SECTOR.get(ticker_symbol)
-        
-        # 2. Map that string to the actual ETF ticker (e.g., 'XLK')
-        sector_etf = SECTOR_ETF_MAPPING.get(true_sector_name) if true_sector_name else None
+        sector_category = TICKER_TRUE_SECTOR.get(ticker_symbol)
+        sector_etf = SECTOR_ETF_MAPPING.get(sector_category) if sector_category else None
 
         if sector_etf:
             sector_score, sector_details = calculate_sector_score(sector_etf)
             sector_modifier = 1 + (sector_score / 100) * 0.15
         else:
-            sector_modifier = 1.0  # fallback to neutral if truly unmapped
+            sector_score, sector_details = None, {}
+            sector_modifier = 1.0
 
         final_score = max(-100, min(100, core_score * sector_modifier))
 

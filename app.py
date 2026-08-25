@@ -1,22 +1,18 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
+import time
 
-# 1. IMPORTING THE NECESSARY SCRIPTS
 from universe import STOCK_UNIVERSES
 from technical import calculate_technical_score
-from fundamentals import calculate_fundamental_score
+from fundamentals import calculate_fundamental_score, get_earnings_countdown
 from sentiment import calculate_sentiment_score
 
-
-# 2. PAGE SETUP
 st.set_page_config(
     page_title="Stock Finder",
     page_icon="📈",
     layout="wide"
 )
 
-# 3. SIDEBAR CONTROLS
 with st.sidebar:
     st.title("⚙️ Stock Finder Engine")
     selected_category = st.selectbox(
@@ -25,11 +21,37 @@ with st.sidebar:
     )
     st.info(f"Target universe contains **{len(STOCK_UNIVERSES[selected_category])}** equities.")
 
-# 4. MAIN DASHBOARD VIEW
+    st.markdown("---")
+    st.caption("**Setup Icon Legend**")
+    st.caption("🚀 Bullish Momentum &nbsp;&nbsp; 🎯 Bullish Pullback")
+    st.caption("⚡ Bearish Momentum &nbsp;&nbsp; 🪤 Bearish Pullback")
+    st.caption("➖ No Clear 4H Setup")
+
 st.title(f"📊 Stock Finder: {selected_category}")
 st.divider()
 
-# 5. LIVE DATA SCANNER (The Loop)
+
+def get_setup_icon(tech_score, tech_details):
+    """
+    Combines the technical score's direction with the 4H Trading Mode
+    (already computed inside technical.py) to produce a single icon
+    showing, at a glance, whether a stock is in a momentum or pullback
+    setup — no click required.
+    """
+    mode = tech_details.get("4H Trading Mode", "Neutral")
+
+    if tech_score > 0 and mode == "Momentum":
+        return "🚀"
+    elif tech_score > 0 and mode == "Pullback":
+        return "🎯"
+    elif tech_score < 0 and mode == "Momentum":
+        return "⚡"
+    elif tech_score < 0 and mode == "Pullback":
+        return "🎯"
+    else:
+        return "➖"
+
+
 if "last_scanned_category" not in st.session_state or st.session_state.last_scanned_category != selected_category:
 
     scanned_data = []
@@ -40,25 +62,22 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
 
     for i, (name, ticker) in enumerate(tickers_in_category.items()):
 
-        # --- 1. CALLING ENGINES (Unpacking Tuples) ---
         tech_score, tech_details = calculate_technical_score(ticker, category_name=selected_category)
         fund_score, fund_details = calculate_fundamental_score(ticker)
         sent_score, sent_details = calculate_sentiment_score(ticker)
 
-        # --- 2. MASTER WEIGHTING MATH ---
-        # Technicals (33%), Fundamentals (33%), Sentiment (34%)
-        # No seasonality engine for this build.
-        master_score = (tech_score * 0.34) + (fund_score * 0.33) + (sent_score * 0.33)
+        master_score = (tech_score * 0.33) + (fund_score * 0.33) + (sent_score * 0.34)
 
-        # --- 3. BIAS LABELING ---
         if master_score >= 50: bias_label = "🔥 Very Bullish"
         elif master_score >= 15: bias_label = "📈 Bullish"
         elif master_score > -15: bias_label = "⚖️ Neutral"
         elif master_score > -50: bias_label = "📉 Bearish"
         else: bias_label = "❄️ Very Bearish"
 
-        # --- 4. ADD TO TABLE & SAVE BREAKDOWNS ---
+        setup_icon = get_setup_icon(tech_score, tech_details)
+
         scanned_data.append({
+            "Setup": setup_icon,
             "Stock": name,
             "Master Score": round(master_score, 1),
             "Bias Status": bias_label,
@@ -68,12 +87,14 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
         })
 
         breakdown_data[name] = {
+            "Ticker": ticker,
             "Technicals": tech_details,
             "Fundamentals": fund_details,
             "Sentiment": sent_details,
         }
 
         my_bar.progress((i + 1) / total_stocks)
+        time.sleep(0.3)
 
     my_bar.empty()
 
@@ -81,13 +102,10 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
     st.session_state.breakdown_data = breakdown_data
     st.session_state.last_scanned_category = selected_category
 
-# Retrieve from session state for display
 df = pd.DataFrame(st.session_state.scanned_data).sort_values(by="Master Score", ascending=False).reset_index(drop=True)
 breakdown_data = st.session_state.breakdown_data
 
-# --- 6. THE COLOR FORMATTING ENGINE ---
 def color_scores(val):
-    """Colors positive numbers green and negative numbers red."""
     if isinstance(val, (int, float)):
         if val > 0:
             return 'color: #00FF00; font-weight: bold;'
@@ -97,12 +115,7 @@ def color_scores(val):
             return 'color: gray;'
     return ''
 
-score_cols = [
-    "Master Score",
-    "Technicals (33%)",
-    "Fundamentals (33%)",
-    "Sentiment (34%)",
-]
+score_cols = ["Master Score", "Technicals (33%)", "Fundamentals (33%)", "Sentiment (34%)"]
 
 styled_df = (
     df.style
@@ -110,7 +123,6 @@ styled_df = (
     .format("{:.1f}", subset=["Master Score"])
 )
 
-# Display the interactive dataframe with row-selection enabled
 event = st.dataframe(
     styled_df,
     width="stretch",
@@ -118,17 +130,25 @@ event = st.dataframe(
     selection_mode="single-row"
 )
 
-# --- 7. THE DRILL-DOWN BREAKDOWN UI ---
 selected_rows = event.selection.rows
 
 if selected_rows:
     selected_idx = selected_rows[0]
     selected_stock = df.iloc[selected_idx]["Stock"]
-
     details = breakdown_data[selected_stock]
+    selected_ticker = details["Ticker"]
 
     st.divider()
     st.subheader(f"🔍 Deep Dive: {selected_stock}")
+
+    # --- Earnings countdown: informational only, does NOT affect scoring ---
+    countdown = get_earnings_countdown(selected_ticker)
+    if countdown and 0 <= countdown["days_until"] <= 7:
+        date_str = countdown["date"].strftime("%b %d, %Y")
+        if countdown["days_until"] == 0:
+            st.warning(f"📅 **Earnings report today** ({date_str}) — expect elevated volatility.")
+        else:
+            st.warning(f"📅 **Earnings in {countdown['days_until']} day(s)** ({date_str}) — expect elevated volatility.")
 
     col1, col2 = st.columns(2)
 
