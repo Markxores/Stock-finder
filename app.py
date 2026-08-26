@@ -94,7 +94,7 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
         }
 
         my_bar.progress((i + 1) / total_stocks)
-        time.sleep(0.3)
+        time.sleep(0.8)
 
     my_bar.empty()
 
