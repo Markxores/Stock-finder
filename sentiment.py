@@ -63,7 +63,26 @@ def calculate_news_sentiment(ticker_symbol, limit=15):
 
 # ============================================================
 # 2. SMART MONEY FLOW (Options PCR & OI)
+# — Dead-zone contrarian scoring, calibrated against real PCR
+#   distribution across the stock universe:
+#     Dead zone (0.6-0.9): flat ZERO, no signal
+#     Below 0.6 (greed): contrarian -> BEARISH, scales with distance
+#     Above 0.9 (fear): contrarian -> BULLISH, scales with distance
+#   Separately calibrated per side since real PCR is right-skewed
+#   (fear-side deviations run much larger than greed-side deviations).
 # ============================================================
+def _score_pcr_dead_zone_contrarian(blended_pcr, lower_bound=0.6, upper_bound=0.9,
+                                      low_side_scale=200.0, high_side_scale=90.0):
+    if lower_bound <= blended_pcr <= upper_bound:
+        return 0.0
+    elif blended_pcr > upper_bound:
+        distance = blended_pcr - upper_bound
+        return max(-100.0, min(100.0, distance * high_side_scale))
+    else:
+        distance = lower_bound - blended_pcr
+        return max(-100.0, min(100.0, -(distance * low_side_scale)))
+
+
 @with_retry(max_retries=2, delay_seconds=2)
 def calculate_options_flow(ticker_symbol, min_oi_leg=30, min_vol_leg=20):
     try:
@@ -113,11 +132,9 @@ def calculate_options_flow(ticker_symbol, min_oi_leg=30, min_vol_leg=20):
         if blended_pcr is None:
             return None
 
-        neutral_baseline = 0.75
-        dev_pcr = blended_pcr - neutral_baseline
-        raw_score = -(dev_pcr * 200.0)
+        raw_score = _score_pcr_dead_zone_contrarian(blended_pcr)
 
-        return max(-100, min(100, round(raw_score, 1)))
+        return round(raw_score, 1)
 
     except Exception:
         return None
