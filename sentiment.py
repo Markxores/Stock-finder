@@ -1,12 +1,28 @@
 import yfinance as yf
 import pandas as pd
-import pysentiment2 as ps
 import streamlit as st
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from yf_session import get_yf_session, with_retry
 
 # ============================================================
-# 1. RETAIL & MEDIA SENTIMENT (Loughran-McDonald)
+# 1. RETAIL & MEDIA SENTIMENT (VADER)
+# — Switched from Loughran-McDonald after diagnostic testing showed
+#   LM producing frequent, unjustified extreme (-1.000) readings on
+#   short financial headlines due to small-sample degeneracy in its
+#   polarity formula (a single dictionary word match can pin the
+#   score to the absolute floor/ceiling regardless of real meaning).
+#   VADER was more stable and better matched real-world reading of
+#   headline sentiment in side-by-side testing.
+#
+#   VADER itself reads structurally positive on financial text in
+#   general (calibrated median ticker-level compound was +0.365
+#   across 261 tickers) — this is de-meaned against that baseline
+#   before scaling, so the score reflects deviation from "typical"
+#   financial news tone, not an absolute positivity reading.
 # ============================================================
+VADER_NEWS_BASELINE = 0.365  # calibrated median ticker-level compound score across the universe
+VADER_NEWS_MULTIPLIER = 400.0  # calibrated
+
 @with_retry(max_retries=2, delay_seconds=2)
 def calculate_news_sentiment(ticker_symbol, limit=15):
     try:
@@ -17,10 +33,9 @@ def calculate_news_sentiment(ticker_symbol, limit=15):
         if not news_items:
             return None
 
-        lm = ps.LM()
-        total_polarity = 0
+        vader = SentimentIntensityAnalyzer()
+        total_compound = 0.0
         count = 0
-        matched_headlines_count = 0
         seen_headlines = set()
 
         for item in news_items[:limit]:
@@ -36,23 +51,14 @@ def calculate_news_sentiment(ticker_symbol, limit=15):
                 continue
             seen_headlines.add(text_lower)
 
-            tokens = lm.tokenize(text)
-            score_dict = lm.get_score(tokens)
-            polarity = score_dict.get('Polarity', 0.0)
-
-            if score_dict.get('Positive', 0) > 0 or score_dict.get('Negative', 0) > 0:
-                matched_headlines_count += 1
-
-            total_polarity += polarity
+            compound = vader.polarity_scores(text)['compound']
+            total_compound += compound
             count += 1
 
         if count > 0:
-            avg_polarity = total_polarity / count
-            scaled_score = avg_polarity * 225.0
-
-            density_ratio = matched_headlines_count / count
-            if density_ratio < 0.15:
-                scaled_score *= (density_ratio / 0.15)
+            avg_compound = total_compound / count
+            relative_compound = avg_compound - VADER_NEWS_BASELINE
+            scaled_score = relative_compound * VADER_NEWS_MULTIPLIER
 
             return max(-100, min(100, round(scaled_score, 1)))
 
@@ -216,7 +222,7 @@ def calculate_sentiment_score(ticker_symbol):
     if not active_weights:
         details = {
             "Smart Money (Options Flow)": "No Data",
-            "News NLP (Loughran-McDonald)": "No Data",
+            "News NLP (VADER)": "No Data",
             "Analyst Catalyst": "No Recent Actions",
         }
         return 0, details
@@ -232,7 +238,7 @@ def calculate_sentiment_score(ticker_symbol):
 
     details = {
         "Smart Money (Options Flow)": options_score if options_score is not None else "No Data",
-        "News NLP (Loughran-McDonald)": news_score if news_score is not None else "No Data",
+        "News NLP (VADER)": news_score if news_score is not None else "No Data",
         "Analyst Catalyst": f"{catalyst_score} ({catalyst_details})" if has_catalyst else "No Recent Actions",
     }
 

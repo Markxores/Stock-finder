@@ -1,0 +1,59 @@
+import yfinance as yf
+import pandas as pd
+import pysentiment2 as ps
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from universe import STOCK_UNIVERSES
+import random
+
+# Pull a representative sample of tickers across different baskets
+random.seed(42)
+all_tickers = set()
+for basket in STOCK_UNIVERSES.values():
+    for ticker in basket.values():
+        all_tickers.add(ticker)
+
+sample_tickers = random.sample(sorted(all_tickers), min(20, len(all_tickers)))
+
+lm = ps.LM()
+vader = SentimentIntensityAnalyzer()
+
+headline_records = []
+
+for ticker in sample_tickers:
+    try:
+        asset = yf.Ticker(ticker)
+        news_items = asset.news
+        if not news_items:
+            continue
+
+        seen = set()
+        for item in news_items[:15]:
+            content = item.get('content', {})
+            title = content.get('title', '')
+            summary = content.get('summary', '')
+            text = f"{title}. {summary}".strip('. ')
+            if not text or text.lower() in seen:
+                continue
+            seen.add(text.lower())
+
+            # LM scoring
+            tokens = lm.tokenize(text)
+            lm_score_dict = lm.get_score(tokens)
+            lm_polarity = lm_score_dict.get('Polarity', 0.0)
+
+            # VADER scoring
+            vader_compound = vader.polarity_scores(text)['compound']
+
+            headline_records.append({
+                "ticker": ticker,
+                "text": text,
+                "lm_polarity": lm_polarity,
+                "vader_compound": vader_compound,
+            })
+    except Exception:
+        continue
+
+df = pd.DataFrame(headline_records)
+df.to_csv("sentiment_model_comparison_raw.csv", index=False)
+print(f"✅ Collected {len(df)} headlines from {len(sample_tickers)} tickers")
+print(f"Saved to sentiment_model_comparison_raw.csv")
