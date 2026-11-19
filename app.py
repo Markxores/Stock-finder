@@ -9,6 +9,7 @@ from universe import STOCK_UNIVERSES
 from technical import calculate_technical_score
 from fundamentals import calculate_fundamental_score, get_earnings_countdown
 from sentiment import calculate_sentiment_score
+from yf_session import DataFetchError, seconds_until_unblocked
 
 # ============================================================
 # WATCHLIST PERSISTENCE (GitHub Gist, with local file fallback)
@@ -200,6 +201,13 @@ with st.sidebar:
 
     st.info(f"Target universe contains **{len(tickers_in_category)}** equities.")
 
+    # --- Re-scan button ---
+    # Successful lookups are remembered, so a re-scan only asks Yahoo for
+    # the pieces that are missing or out of date.
+    if st.button("🔄 Re-scan this universe", use_container_width=True):
+        st.session_state.last_scanned_category = None
+    st.caption("Re-scanning only re-fetches missing or out-of-date data.")
+
     # --- Watchlist storage status ---
     if st.session_state.watchlist_status == "gist":
         st.caption("☁️ Watchlist synced with GitHub Gist")
@@ -219,7 +227,7 @@ with st.sidebar:
     st.caption("**Setup Icon Legend**")
     st.caption("🚀 Bullish Momentum &nbsp;&nbsp; 🎯 Bullish Pullback")
     st.caption("⚡ Bearish Momentum &nbsp;&nbsp; 🎯 Bearish Pullback")
-    st.caption("➖ No Clear 4H Setup")
+    st.caption("➖ No Clear 4H Setup &nbsp;&nbsp; ❓ Technical data missing")
 
 st.title(f"📊 Stock Finder: {selected_category}")
 st.divider()
@@ -231,10 +239,16 @@ def get_setup_icon(tech_score, tech_details):
     """
     Combines the technical score's direction with the 4H Trading Mode.
     Unified Pullback Icon: 🎯 used for both bull and bear pullbacks.
+    ❓ means the technical data (or its 4H part) could not be fetched.
     """
+    if tech_score is None:
+        return "❓"
+
     mode = tech_details.get("4H Trading Mode", "Neutral")
 
-    if mode == "Pullback":
+    if mode == "Unavailable":
+        return "❓"
+    elif mode == "Pullback":
         return "🎯"
     elif tech_score > 0 and mode == "Momentum":
         return "🚀"
@@ -242,6 +256,38 @@ def get_setup_icon(tech_score, tech_details):
         return "⚡"
     else:
         return "➖"
+
+# ============================================================
+# HELPER: RUN ONE SCORE SAFELY
+# Runs a scoring function and never lets one failure crash the scan.
+# Returns (score, details, status) where status is:
+#   "ok"      -> everything fetched
+#   "partial" -> a score exists but some data was missing (see the note)
+#   "failed"  -> no score could be produced (score is None)
+# ============================================================
+def run_score(score_function, *args, **kwargs):
+    try:
+        score, details = score_function(*args, **kwargs)
+    except DataFetchError as e:
+        return None, {"⚠️ STATUS": f"Data fetch failed. {e}"}, "failed"
+    except Exception as e:
+        return None, {"⚠️ STATUS": f"Unexpected error: {e}"}, "failed"
+
+    has_warning = any(str(key).startswith("⚠️") for key in details.keys())
+    return score, details, ("partial" if has_warning else "ok")
+
+
+def get_bias_label(master_score):
+    if master_score is None:
+        return "⚠️ No Data"
+    if master_score >= 50: return "🔥 Very Bullish"
+    elif master_score >= 15: return "📈 Bullish"
+    elif master_score > -15: return "⚖️ Neutral"
+    elif master_score > -50: return "📉 Bearish"
+    else: return "❄️ Very Bearish"
+
+
+PILLAR_WEIGHTS = {"Technicals": 0.33, "Fundamentals": 0.33, "Sentiment": 0.34}
 
 # ============================================================
 # LIVE DATA SCANNER (The Loop)
@@ -264,29 +310,47 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
         my_bar = st.progress(0, text="Scanning live markets...")
 
         for i, (name, ticker) in enumerate(tickers_in_category.items()):
+            my_bar.progress(i / total_stocks, text=f"Scanning {name} ({i + 1} of {total_stocks})...")
 
-            tech_score, tech_details = calculate_technical_score(ticker, category_name=selected_category)
-            fund_score, fund_details = calculate_fundamental_score(ticker)
-            sent_score, sent_details = calculate_sentiment_score(ticker)
+            # No fixed sleep here any more: yf_session.py spaces out every
+            # Yahoo request itself, and skips waiting for data we already have.
+            tech_score, tech_details, tech_status = run_score(calculate_technical_score, ticker, category_name=selected_category)
+            fund_score, fund_details, fund_status = run_score(calculate_fundamental_score, ticker)
+            sent_score, sent_details, sent_status = run_score(calculate_sentiment_score, ticker)
 
-            master_score = (tech_score * 0.33) + (fund_score * 0.33) + (sent_score * 0.34)
+            pillars = {
+                "Technicals": (tech_score, tech_status),
+                "Fundamentals": (fund_score, fund_status),
+                "Sentiment": (sent_score, sent_status),
+            }
 
-            if master_score >= 50: bias_label = "🔥 Very Bullish"
-            elif master_score >= 15: bias_label = "📈 Bullish"
-            elif master_score > -15: bias_label = "⚖️ Neutral"
-            elif master_score > -50: bias_label = "📉 Bearish"
-            else: bias_label = "❄️ Very Bearish"
+            # Master score = weighted average of the pillars that worked.
+            # If all three worked, this is exactly the old 33/33/34 formula.
+            usable = {name_: score for name_, (score, _) in pillars.items() if score is not None}
+            if usable:
+                total_weight = sum(PILLAR_WEIGHTS[n] for n in usable)
+                master_score = sum(score * PILLAR_WEIGHTS[n] for n, score in usable.items()) / total_weight
+            else:
+                master_score = None
 
-            setup_icon = get_setup_icon(tech_score, tech_details)
+            failed_names = [n for n, (_, status) in pillars.items() if status == "failed"]
+            partial_names = [n for n, (_, status) in pillars.items() if status == "partial"]
+            if failed_names:
+                data_status = "⚠️ Missing: " + ", ".join(failed_names)
+            elif partial_names:
+                data_status = "⚠️ Partial: " + ", ".join(partial_names)
+            else:
+                data_status = "✅ Complete"
 
             scanned_data.append({
-                "Setup": setup_icon,
+                "Setup": get_setup_icon(tech_score, tech_details),
                 "Stock": name,
-                "Master Score": round(master_score, 1),
-                "Bias Status": bias_label,
-                "Technicals (33%)": int(tech_score),
-                "Fundamentals (33%)": int(fund_score),
-                "Sentiment (34%)": int(sent_score),
+                "Master Score": round(master_score, 1) if master_score is not None else None,
+                "Bias Status": get_bias_label(master_score),
+                "Technicals (33%)": int(tech_score) if tech_score is not None else None,
+                "Fundamentals (33%)": int(fund_score) if fund_score is not None else None,
+                "Sentiment (34%)": int(sent_score) if sent_score is not None else None,
+                "Data": data_status,
             })
 
             breakdown_data[name] = {
@@ -295,10 +359,6 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
                 "Fundamentals": fund_details,
                 "Sentiment": sent_details,
             }
-
-            my_bar.progress((i + 1) / total_stocks)
-            # 0.8s rate-limit buffer to prevent Yahoo WAF blocks
-            time.sleep(0.8)
 
         my_bar.empty()
 
@@ -311,8 +371,26 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
 # ============================================================
 df = pd.DataFrame(st.session_state.scanned_data)
 if not df.empty:
-    df = df.sort_values(by="Master Score", ascending=False).reset_index(drop=True)
+    df = df.sort_values(by="Master Score", ascending=False, na_position="last").reset_index(drop=True)
 breakdown_data = st.session_state.breakdown_data
+
+# --- Warnings about missing data / Yahoo blocking ---
+if not df.empty and "Data" in df.columns:
+    problem_count = int((df["Data"] != "✅ Complete").sum())
+    if problem_count > 0:
+        st.warning(
+            f"⚠️ {problem_count} stock(s) have missing or partial data (see the Data column). "
+            "Their Master Score uses only the data that was available. "
+            "Press **Re-scan this universe** in the sidebar to retry. "
+            "Only the missing pieces are fetched again."
+        )
+
+    wait_seconds = seconds_until_unblocked()
+    if wait_seconds > 0:
+        st.error(
+            f"🚦 Yahoo is limiting requests right now. "
+            f"Wait about {wait_seconds} seconds before re-scanning."
+        )
 
 def color_scores(val):
     if isinstance(val, (int, float)):
@@ -325,12 +403,14 @@ def color_scores(val):
     return ''
 
 score_cols = ["Master Score", "Technicals (33%)", "Fundamentals (33%)", "Sentiment (34%)"]
+pillar_cols = ["Technicals (33%)", "Fundamentals (33%)", "Sentiment (34%)"]
 
 if not df.empty:
     styled_df = (
         df.style
         .map(color_scores, subset=score_cols)
-        .format("{:.1f}", subset=["Master Score"])
+        .format("{:.1f}", subset=["Master Score"], na_rep="⚠️ failed")
+        .format("{:.0f}", subset=pillar_cols, na_rep="⚠️ failed")
     )
 
     event = st.dataframe(
@@ -390,8 +470,12 @@ if selected_rows:
                 else:
                     st.error(f"❌ Not added. {msg}")
 
-    # --- Earnings countdown ---
-    countdown = get_earnings_countdown(selected_ticker)
+    # --- Earnings countdown (informational; skipped quietly if it can't be fetched) ---
+    try:
+        countdown = get_earnings_countdown(selected_ticker)
+    except Exception:
+        countdown = None
+
     if countdown and 0 <= countdown["days_until"] <= 7:
         date_str = countdown["date"].strftime("%b %d, %Y")
         if countdown["days_until"] == 0:
