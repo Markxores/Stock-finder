@@ -1,93 +1,41 @@
 import pandas as pd
 import streamlit as st
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from yf_session import DataFetchError, get_ticker, with_retry
 
 # ============================================================
-# HOW FAILURES WORK IN THIS FILE
-#   - Each Yahoo download (news, options, analyst actions) is cached on
-#     its own. If Yahoo fails, it raises DataFetchError and Streamlit
-#     does NOT save the failure.
-#   - "No news", "no options" and "no analyst actions" are accepted as
-#     real answers, because some stocks genuinely have none.
-#   - The scoring maths is NOT cached. It is instant.
-# ============================================================
-
-# ============================================================
-# 1. RETAIL & MEDIA SENTIMENT (VADER)
-# — Switched from Loughran-McDonald after diagnostic testing showed
-#   LM producing frequent, unjustified extreme (-1.000) readings on
-#   short financial headlines due to small-sample degeneracy in its
-#   polarity formula (a single dictionary word match can pin the
-#   score to the absolute floor/ceiling regardless of real meaning).
-#   VADER was more stable and better matched real-world reading of
-#   headline sentiment in side-by-side testing.
+# THIS FILE NOW PRODUCES TWO SEPARATE COLUMNS
+#   1. Options          (put/call ratio, contrarian)
+#   2. Catalyst Action  (analyst upgrades and downgrades)
 #
-#   VADER itself reads structurally positive on financial text in
-#   general (calibrated median ticker-level compound was +0.365
-#   across 261 tickers) — this is de-meaned against that baseline
-#   before scaling, so the score reflects deviation from "typical"
-#   financial news tone, not an absolute positivity reading.
+# News sentiment has been removed completely.
+#
+# Every function here returns a small "result" like this:
+#     {"score": number or None, "issue": None / "missing" / "failed", "details": {...}}
+#
+#   score = a real number (including a REAL zero)  -> the app shows the number
+#   score = None                                    -> the app shows a dash "–"
+#   issue = "failed"  -> the download broke (worth a re-scan)
+#   issue = "missing" -> the data genuinely does not exist for this stock
+#
+# Scores here are still on the old -100 to +100 scale. The app.py file
+# scales them down (to -2 to +2) in one place.
 # ============================================================
-VADER_NEWS_BASELINE = 0.365  # calibrated median ticker-level compound score across the universe
-VADER_NEWS_MULTIPLIER = 400.0  # calibrated
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-@with_retry(max_retries=2, delay_seconds=2)
-def _get_news_items(ticker_symbol):
-    return list(get_ticker(ticker_symbol).news or [])
-
-
-def calculate_news_sentiment(ticker_symbol, limit=15):
-    news_items = _get_news_items(ticker_symbol)  # raises DataFetchError if Yahoo fails
-
-    if not news_items:
-        return None
-
-    vader = SentimentIntensityAnalyzer()
-    total_compound = 0.0
-    count = 0
-    seen_headlines = set()
-
-    for item in news_items[:limit]:
-        content = item.get('content', {})
-        title = content.get('title', '')
-        summary = content.get('summary', '')
-        text = f"{title}. {summary}".strip('. ')
-        text_lower = text.lower()
-
-        if not text_lower:
-            continue
-        if text_lower in seen_headlines:
-            continue
-        seen_headlines.add(text_lower)
-
-        compound = vader.polarity_scores(text)['compound']
-        total_compound += compound
-        count += 1
-
-    if count > 0:
-        avg_compound = total_compound / count
-        relative_compound = avg_compound - VADER_NEWS_BASELINE
-        scaled_score = relative_compound * VADER_NEWS_MULTIPLIER
-
-        return max(-100, min(100, round(scaled_score, 1)))
-
-    return None
 
 
 # ============================================================
-# 2. SMART MONEY FLOW (Options PCR & OI)
+# 1. OPTIONS (Put/Call Ratio)
 # — Dead-zone contrarian scoring, calibrated against real PCR
 #   distribution across the stock universe:
-#     Dead zone (0.6-0.9): flat ZERO, no signal
+#     Dead zone (0.6-0.9): a REAL zero, no signal
 #     Below 0.6 (greed): contrarian -> BEARISH, scales with distance
 #     Above 0.9 (fear): contrarian -> BULLISH, scales with distance
-#   Separately calibrated per side since real PCR is right-skewed
-#   (fear-side deviations run much larger than greed-side deviations).
+#   Separately calibrated per side since real PCR is right-skewed.
 # ============================================================
-def _score_pcr_dead_zone_contrarian(blended_pcr, lower_bound=0.6, upper_bound=0.9,
+PCR_LOWER_BOUND = 0.6
+PCR_UPPER_BOUND = 0.9
+
+
+def _score_pcr_dead_zone_contrarian(blended_pcr, lower_bound=PCR_LOWER_BOUND, upper_bound=PCR_UPPER_BOUND,
                                       low_side_scale=200.0, high_side_scale=90.0):
     if lower_bound <= blended_pcr <= upper_bound:
         return 0.0
@@ -137,11 +85,8 @@ def _get_options_totals(ticker_symbol):
     return tuple(totals)
 
 
-def calculate_options_flow(ticker_symbol, min_oi_leg=30, min_vol_leg=20):
-    totals = _get_options_totals(ticker_symbol)  # raises DataFetchError if Yahoo fails
-    if totals is None:
-        return None
-
+def _blend_pcr(totals, min_oi_leg=30, min_vol_leg=20):
+    """Turns the raw options totals into one put/call ratio, or None if there is too little activity."""
     total_call_vol, total_put_vol, total_call_oi, total_put_oi = totals
 
     if total_call_oi == 0 and total_call_vol == 0:
@@ -158,26 +103,53 @@ def calculate_options_flow(ticker_symbol, min_oi_leg=30, min_vol_leg=20):
         vol_pcr = total_put_vol / total_call_vol
 
     if total_vol < 1000:
-        blended_pcr = oi_pcr
+        return oi_pcr
     elif vol_pcr is not None and oi_pcr is not None:
-        blended_pcr = (vol_pcr * 0.50) + (oi_pcr * 0.50)
+        return (vol_pcr * 0.50) + (oi_pcr * 0.50)
     elif oi_pcr is not None:
-        blended_pcr = oi_pcr
+        return oi_pcr
     elif vol_pcr is not None:
-        blended_pcr = vol_pcr
-    else:
-        blended_pcr = None
+        return vol_pcr
+    return None
 
+
+def calculate_options_column(ticker_symbol):
+    try:
+        totals = _get_options_totals(ticker_symbol)
+    except DataFetchError as e:
+        return {"score": None, "issue": "failed",
+                "details": {"Options (Put/Call)": f"⚠️ Fetch failed. {e}"}}
+
+    # No options at all for this stock = MISSING (not a neutral zero)
+    if totals is None:
+        return {"score": None, "issue": "missing",
+                "details": {"Options (Put/Call)": "No options exist for this stock"}}
+
+    blended_pcr = _blend_pcr(totals)
     if blended_pcr is None:
-        return None
+        return {"score": None, "issue": "missing",
+                "details": {"Options (Put/Call)": "Too little options activity to read"}}
 
-    raw_score = _score_pcr_dead_zone_contrarian(blended_pcr)
+    score = round(_score_pcr_dead_zone_contrarian(blended_pcr), 1)
 
-    return round(raw_score, 1)
+    if blended_pcr > PCR_UPPER_BOUND:
+        zone = "Fear zone (contrarian bullish)"
+    elif blended_pcr < PCR_LOWER_BOUND:
+        zone = "Greed zone (contrarian bearish)"
+    else:
+        zone = "Dead zone (neutral, real zero)"
+
+    return {"score": score, "issue": None,
+            "details": {
+                "Put/Call Ratio (blended)": f"{blended_pcr:.2f}",
+                "Zone": zone,
+            }}
 
 
 # ============================================================
-# 3. ANALYST CATALYST (Event Hype)
+# 2. CATALYST ACTION (analyst upgrades / downgrades, last 14 days)
+#   - "No coverage" and "no recent actions" are REAL zeros.
+#   - Only a failed download counts as missing.
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 @with_retry(max_retries=2, delay_seconds=2)
@@ -185,11 +157,16 @@ def _get_analyst_actions(ticker_symbol):
     return get_ticker(ticker_symbol).upgrades_downgrades
 
 
-def calculate_analyst_catalyst(ticker_symbol, days_back=14):
-    recos = _get_analyst_actions(ticker_symbol)  # raises DataFetchError if Yahoo fails
+def calculate_catalyst_column(ticker_symbol, days_back=14):
+    try:
+        recos = _get_analyst_actions(ticker_symbol)
+    except DataFetchError as e:
+        return {"score": None, "issue": "failed",
+                "details": {"Catalyst Action": f"⚠️ Fetch failed. {e}"}}
 
     if recos is None or recos.empty:
-        return 0, "No Coverage"
+        return {"score": 0.0, "issue": None,
+                "details": {"Catalyst Action": "No analyst coverage (counts as 0)"}}
 
     recos = recos.copy()
     cutoff_date = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=days_back)
@@ -200,7 +177,8 @@ def calculate_analyst_catalyst(ticker_symbol, days_back=14):
     recent_actions = recos[recos.index >= cutoff_date]
 
     if recent_actions.empty:
-        return 0, "No Recent Actions"
+        return {"score": 0.0, "issue": None,
+                "details": {"Catalyst Action": f"No analyst actions in the last {days_back} days (counts as 0)"}}
 
     score = 0
     action_details = []
@@ -216,100 +194,8 @@ def calculate_analyst_catalyst(ticker_symbol, days_back=14):
             score -= 50
             action_details.append(f"Downgrade to {to_grade.title()}")
 
-    final_catalyst_score = max(-100, min(100, score))
-    summary = " | ".join(action_details) if action_details else "Neutral Actions Only"
+    final_score = float(max(-100, min(100, score)))
+    summary = " | ".join(action_details) if action_details else "Neutral actions only (counts as 0)"
 
-    return final_catalyst_score, summary
-
-
-# ============================================================
-# 4. MASTER SENTIMENT ENGINE
-# (Not cached itself: it only does quick maths on cached downloads.)
-#
-# Blends Options Flow, News NLP, and Analyst Catalysts.
-# Dynamically redistributes weights around whichever pillars
-# actually have usable data. A source that FAILED to download is
-# treated like a source with no data (its weight is shared out),
-# and a warning note is added. If ALL three failed, it raises
-# DataFetchError so the app can show the sentiment as failed.
-# ============================================================
-def calculate_sentiment_score(ticker_symbol):
-    failed_sources = []
-
-    try:
-        options_score = calculate_options_flow(ticker_symbol)
-        options_failed = False
-    except DataFetchError:
-        options_score = None
-        options_failed = True
-        failed_sources.append("Options flow")
-
-    try:
-        news_score = calculate_news_sentiment(ticker_symbol)
-        news_failed = False
-    except DataFetchError:
-        news_score = None
-        news_failed = True
-        failed_sources.append("News")
-
-    try:
-        catalyst_score, catalyst_details = calculate_analyst_catalyst(ticker_symbol)
-        catalyst_failed = False
-    except DataFetchError:
-        catalyst_score, catalyst_details = 0, "Fetch failed"
-        catalyst_failed = True
-        failed_sources.append("Analyst actions")
-
-    if len(failed_sources) == 3:
-        raise DataFetchError("All sentiment sources failed (options, news, analyst actions)")
-
-    has_catalyst = (not catalyst_failed) and catalyst_details not in ["No Coverage", "No Recent Actions", "Neutral Actions Only"]
-
-    base_weights = {"options": 0.50, "news": 0.30, "catalyst": 0.20}
-
-    active_weights = {}
-    if options_score is not None:
-        active_weights["options"] = base_weights["options"]
-    if news_score is not None:
-        active_weights["news"] = base_weights["news"]
-    if has_catalyst:
-        active_weights["catalyst"] = base_weights["catalyst"]
-
-    if options_failed:
-        options_text = "⚠️ Fetch failed"
-    else:
-        options_text = options_score if options_score is not None else "No Data"
-
-    if news_failed:
-        news_text = "⚠️ Fetch failed"
-    else:
-        news_text = news_score if news_score is not None else "No Data"
-
-    if catalyst_failed:
-        catalyst_text = "⚠️ Fetch failed"
-    elif has_catalyst:
-        catalyst_text = f"{catalyst_score} ({catalyst_details})"
-    else:
-        catalyst_text = "No Recent Actions"
-
-    details = {
-        "Smart Money (Options Flow)": options_text,
-        "News NLP (VADER)": news_text,
-        "Analyst Catalyst": catalyst_text,
-    }
-    if failed_sources:
-        details["⚠️ Data Notes"] = ", ".join(failed_sources) + " unavailable (score uses the remaining sources)"
-
-    if not active_weights:
-        return 0, details
-
-    total_active_weight = sum(active_weights.values())
-    master_score = 0
-    if "options" in active_weights:
-        master_score += options_score * (active_weights["options"] / total_active_weight)
-    if "news" in active_weights:
-        master_score += news_score * (active_weights["news"] / total_active_weight)
-    if "catalyst" in active_weights:
-        master_score += catalyst_score * (active_weights["catalyst"] / total_active_weight)
-
-    return max(-100, min(100, round(master_score, 1))), details
+    return {"score": final_score, "issue": None,
+            "details": {"Catalyst Action": summary}}

@@ -29,6 +29,10 @@ SECTOR_ETF_MAPPING = {
 #     lookup is NOT remembered. The next scan tries again.
 #   - The caching sits on the raw downloads, not on the final score, so a
 #     half-failed score can never be saved either.
+#
+# CHANGE IN THIS VERSION:
+#   - If a stock has fewer than 200 days of price history, the daily score
+#     is now None (MISSING), instead of a fake 0. The app shows a dash.
 # ============================================================
 
 
@@ -39,7 +43,7 @@ SECTOR_ETF_MAPPING = {
 def calculate_daily_trend_score(ticker_symbol):
     df = get_daily_history(ticker_symbol)  # raises DataFetchError if Yahoo fails
     if len(df) < 200:
-        return 0, {"⚠️ STATUS": "Insufficient History"}
+        return None, {"⚠️ STATUS": "Insufficient History"}
 
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
@@ -252,14 +256,20 @@ def calculate_sector_score(sector_etf_ticker):
 # (Not cached itself: it only does quick maths on cached downloads.)
 #
 # What happens when data is missing:
-#   - Daily prices fail  -> raises DataFetchError (the whole technical score fails)
-#   - 4H prices fail     -> the score uses the daily trend only, with a warning note
-#   - Sector ETF fails   -> no sector adjustment is applied, with a warning note
+#   - Daily prices fail        -> raises DataFetchError (the whole technical score fails)
+#   - Under 200 days of prices -> returns None (MISSING, shown as a dash)
+#   - 4H prices fail           -> the score uses the daily trend only, with a warning note
+#   - Sector ETF fails         -> no sector adjustment is applied, with a warning note
 # ============================================================
 def calculate_technical_score(ticker_symbol, category_name=None):
     notes = []
 
     daily_score, daily_details = calculate_daily_trend_score(ticker_symbol)
+
+    # Not enough price history: there is no real score, so report it as missing
+    if daily_score is None:
+        return None, daily_details
+
     daily_direction = 1 if daily_score > 0 else (-1 if daily_score < 0 else 0)
 
     four_h_available = True

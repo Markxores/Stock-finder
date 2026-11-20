@@ -5,5 +5,3 @@ yfinance
 requests
 beautifulsoup4
 lxml
-pysentiment2
-vaderSentiment

@@ -7,9 +7,50 @@ import requests
 
 from universe import STOCK_UNIVERSES
 from technical import calculate_technical_score
-from fundamentals import calculate_fundamental_score, get_earnings_countdown
-from sentiment import calculate_sentiment_score
+from fundamentals import calculate_fundamental_columns, get_earnings_countdown
+from sentiment import calculate_options_column, calculate_catalyst_column
 from yf_session import DataFetchError, seconds_until_unblocked
+
+# ============================================================
+# ⚙️ SCORING SETTINGS — THE EASY-TO-EDIT PART
+#
+# Every column is first scored on its own "raw" scale, then scaled down
+# to a smaller range. To change how much a column can add or subtract,
+# change its "scaled_max" number. Nothing else needs to change.
+#
+#   raw_max    = the biggest raw score the column can produce (do not change)
+#   scaled_max = the most points the column can add or subtract in the final sum
+#
+# Master Score = simple SUM of all the scaled column scores.
+# Columns with missing data show a dash "–" and add nothing to the sum.
+# ============================================================
+SCORE_COLUMNS = {
+    "Technicals":        {"raw_max": 100, "scaled_max": 4},
+    "Options":           {"raw_max": 100, "scaled_max": 2},
+    "Catalyst Action":   {"raw_max": 100, "scaled_max": 2},
+    "Valuation":         {"raw_max": 200, "scaled_max": 2},   # P/E part + EV/EBITDA part
+    "Growth":            {"raw_max": 200, "scaled_max": 2},   # revenue part + earnings part
+    "Profitability":     {"raw_max": 200, "scaled_max": 2},   # net margin part + ROE part
+    "Financial Health":  {"raw_max": 200, "scaled_max": 2},   # debt/equity part + current ratio part
+    "Earnings Surprise": {"raw_max": 100, "scaled_max": 2},
+    "EPS Revision":      {"raw_max": 100, "scaled_max": 2},
+}
+
+# Bias labels, based on the Master Score (the sum of all columns).
+# The Master Score can run from about -20 to +20.
+VERY_BULLISH_AT = 10     # Master Score of +10 or more
+BULLISH_AT = 6           # Master Score of +6 or more
+# Below -6 is Bearish, and -10 or lower is Very Bearish (mirror image).
+
+FUNDAMENTAL_COLUMNS = ["Valuation", "Growth", "Profitability", "Financial Health",
+                       "Earnings Surprise", "EPS Revision"]
+MARKET_COLUMNS = ["Options", "Catalyst Action"]
+
+
+def column_label(name):
+    """The header shown in the table, e.g. 'Technicals (±4)'."""
+    return f"{name} (±{SCORE_COLUMNS[name]['scaled_max']})"
+
 
 # ============================================================
 # WATCHLIST PERSISTENCE (GitHub Gist, with local file fallback)
@@ -184,15 +225,15 @@ if "custom_watchlist" not in st.session_state:
 # ============================================================
 with st.sidebar:
     st.title("⚙️ Stock Finder Engine")
-    
+
     # Inject Custom Watchlist into the dropdown
     universe_options = ["⭐ Custom Watchlist"] + list(STOCK_UNIVERSES.keys())
-    
+
     selected_category = st.selectbox(
         "Select Universe / Sector",
         universe_options
     )
-    
+
     # Route the engine to the correct dictionary
     if selected_category == "⭐ Custom Watchlist":
         tickers_in_category = st.session_state.custom_watchlist
@@ -228,6 +269,10 @@ with st.sidebar:
     st.caption("🚀 Bullish Momentum &nbsp;&nbsp; 🎯 Bullish Pullback")
     st.caption("⚡ Bearish Momentum &nbsp;&nbsp; 🎯 Bearish Pullback")
     st.caption("➖ No Clear 4H Setup &nbsp;&nbsp; ❓ Technical data missing")
+    st.markdown("---")
+    st.caption("**Reading the score columns**")
+    st.caption("**0.0** = a real score of zero (neutral)")
+    st.caption("**–** = data is missing (adds nothing to the Master Score)")
 
 st.title(f"📊 Stock Finder: {selected_category}")
 st.divider()
@@ -258,36 +303,87 @@ def get_setup_icon(tech_score, tech_details):
         return "➖"
 
 # ============================================================
-# HELPER: RUN ONE SCORE SAFELY
-# Runs a scoring function and never lets one failure crash the scan.
-# Returns (score, details, status) where status is:
-#   "ok"      -> everything fetched
-#   "partial" -> a score exists but some data was missing (see the note)
-#   "failed"  -> no score could be produced (score is None)
+# HELPERS: RUN EACH COLUMN SAFELY
+# Every column ends up as a small "result":
+#     {"score": raw number or None, "issue": None/"missing"/"failed", "details": {...}}
+# One failure can never crash the scan.
 # ============================================================
-def run_score(score_function, *args, **kwargs):
-    try:
-        score, details = score_function(*args, **kwargs)
-    except DataFetchError as e:
-        return None, {"⚠️ STATUS": f"Data fetch failed. {e}"}, "failed"
-    except Exception as e:
-        return None, {"⚠️ STATUS": f"Unexpected error: {e}"}, "failed"
+def failed_result(message):
+    return {"score": None, "issue": "failed", "details": {"⚠️ STATUS": message}}
 
-    has_warning = any(str(key).startswith("⚠️") for key in details.keys())
-    return score, details, ("partial" if has_warning else "ok")
+
+def run_technical(ticker):
+    try:
+        score, details = calculate_technical_score(ticker, category_name=selected_category)
+    except DataFetchError as e:
+        return failed_result(f"Data fetch failed. {e}")
+    except Exception as e:
+        return failed_result(f"Unexpected error: {e}")
+
+    if score is None:
+        issue = "missing"                                  # e.g. not enough price history
+    elif "⚠️ Data Notes" in details:
+        issue = "failed"                                   # a 4H or sector download broke
+    elif any(str(key).startswith("⚠️") for key in details.keys()):
+        issue = "missing"
+    else:
+        issue = None
+    return {"score": score, "issue": issue, "details": details}
+
+
+def run_single(function, ticker):
+    try:
+        return function(ticker)
+    except Exception as e:
+        return failed_result(f"Unexpected error: {e}")
+
+
+def run_fundamentals(ticker):
+    try:
+        return calculate_fundamental_columns(ticker)
+    except Exception as e:
+        return {name: failed_result(f"Unexpected error: {e}") for name in FUNDAMENTAL_COLUMNS}
+
+
+def add_scaled_score(column_name, result):
+    """Turns the raw score into the scaled score (one decimal). A missing score stays None."""
+    raw = result["score"]
+    if raw is None:
+        result["scaled"] = None
+        return
+
+    settings = SCORE_COLUMNS[column_name]
+    cap = settings["scaled_max"]
+    scaled = raw / settings["raw_max"] * cap
+    scaled = max(-cap, min(cap, scaled))
+    result["scaled"] = round(scaled, 1) + 0.0    # "+ 0.0" stops a "-0.0" from appearing
+
+
+def describe_data_status(columns):
+    failed, missing = [], []
+    for name, result in columns.items():
+        tag = name + (" (partial)" if result["score"] is not None else "")
+        if result["issue"] == "failed":
+            failed.append(tag)
+        elif result["issue"] == "missing":
+            missing.append(tag)
+
+    parts = []
+    if failed:
+        parts.append("⚠️ Fetch failed: " + ", ".join(failed))
+    if missing:
+        parts.append("– No data: " + ", ".join(missing))
+    return " | ".join(parts) if parts else "✅ Complete"
 
 
 def get_bias_label(master_score):
     if master_score is None:
         return "⚠️ No Data"
-    if master_score >= 50: return "🔥 Very Bullish"
-    elif master_score >= 15: return "📈 Bullish"
-    elif master_score > -15: return "⚖️ Neutral"
-    elif master_score > -50: return "📉 Bearish"
+    if master_score >= VERY_BULLISH_AT: return "🔥 Very Bullish"
+    elif master_score >= BULLISH_AT: return "📈 Bullish"
+    elif master_score > -BULLISH_AT: return "⚖️ Neutral"
+    elif master_score > -VERY_BULLISH_AT: return "📉 Bearish"
     else: return "❄️ Very Bearish"
-
-
-PILLAR_WEIGHTS = {"Technicals": 0.33, "Fundamentals": 0.33, "Sentiment": 0.34}
 
 # ============================================================
 # LIVE DATA SCANNER (The Loop)
@@ -312,52 +408,37 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
         for i, (name, ticker) in enumerate(tickers_in_category.items()):
             my_bar.progress(i / total_stocks, text=f"Scanning {name} ({i + 1} of {total_stocks})...")
 
-            # No fixed sleep here any more: yf_session.py spaces out every
-            # Yahoo request itself, and skips waiting for data we already have.
-            tech_score, tech_details, tech_status = run_score(calculate_technical_score, ticker, category_name=selected_category)
-            fund_score, fund_details, fund_status = run_score(calculate_fundamental_score, ticker)
-            sent_score, sent_details, sent_status = run_score(calculate_sentiment_score, ticker)
+            # No fixed sleep here: yf_session.py spaces out every Yahoo request
+            # itself, and skips waiting for data we already have.
+            columns = {}
+            columns["Technicals"] = run_technical(ticker)
+            columns["Options"] = run_single(calculate_options_column, ticker)
+            columns["Catalyst Action"] = run_single(calculate_catalyst_column, ticker)
+            columns.update(run_fundamentals(ticker))
 
-            pillars = {
-                "Technicals": (tech_score, tech_status),
-                "Fundamentals": (fund_score, fund_status),
-                "Sentiment": (sent_score, sent_status),
-            }
+            # Scale every column, then add them up.
+            for column_name in SCORE_COLUMNS:
+                add_scaled_score(column_name, columns[column_name])
 
-            # Master score = weighted average of the pillars that worked.
-            # If all three worked, this is exactly the old 33/33/34 formula.
-            usable = {name_: score for name_, (score, _) in pillars.items() if score is not None}
-            if usable:
-                total_weight = sum(PILLAR_WEIGHTS[n] for n in usable)
-                master_score = sum(score * PILLAR_WEIGHTS[n] for n, score in usable.items()) / total_weight
-            else:
-                master_score = None
+            # Master Score = simple SUM of the scaled columns.
+            # A missing column adds nothing (but shows a dash in the table).
+            scaled_values = [columns[c]["scaled"] for c in SCORE_COLUMNS if columns[c]["scaled"] is not None]
+            master_score = round(sum(scaled_values), 1) + 0.0 if scaled_values else None
 
-            failed_names = [n for n, (_, status) in pillars.items() if status == "failed"]
-            partial_names = [n for n, (_, status) in pillars.items() if status == "partial"]
-            if failed_names:
-                data_status = "⚠️ Missing: " + ", ".join(failed_names)
-            elif partial_names:
-                data_status = "⚠️ Partial: " + ", ".join(partial_names)
-            else:
-                data_status = "✅ Complete"
-
-            scanned_data.append({
-                "Setup": get_setup_icon(tech_score, tech_details),
+            row = {
+                "Setup": get_setup_icon(columns["Technicals"]["score"], columns["Technicals"]["details"]),
                 "Stock": name,
-                "Master Score": round(master_score, 1) if master_score is not None else None,
+                "Master Score": master_score,
                 "Bias Status": get_bias_label(master_score),
-                "Technicals (33%)": int(tech_score) if tech_score is not None else None,
-                "Fundamentals (33%)": int(fund_score) if fund_score is not None else None,
-                "Sentiment (34%)": int(sent_score) if sent_score is not None else None,
-                "Data": data_status,
-            })
+            }
+            for column_name in SCORE_COLUMNS:
+                row[column_label(column_name)] = columns[column_name]["scaled"]
+            row["Data"] = describe_data_status(columns)
+            scanned_data.append(row)
 
             breakdown_data[name] = {
                 "Ticker": ticker,
-                "Technicals": tech_details,
-                "Fundamentals": fund_details,
-                "Sentiment": sent_details,
+                "Columns": columns,
             }
 
         my_bar.empty()
@@ -370,19 +451,32 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
 # DATAFRAME RENDERING
 # ============================================================
 df = pd.DataFrame(st.session_state.scanned_data)
+
+score_cols = ["Master Score"] + [column_label(c) for c in SCORE_COLUMNS]
+column_score_cols = [column_label(c) for c in SCORE_COLUMNS]
+
 if not df.empty:
+    # Make sure every score column is a proper number column (missing = blank/NaN)
+    for col in score_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.sort_values(by="Master Score", ascending=False, na_position="last").reset_index(drop=True)
 breakdown_data = st.session_state.breakdown_data
 
-# --- Warnings about missing data / Yahoo blocking ---
+# --- Warnings about failed downloads / Yahoo blocking ---
 if not df.empty and "Data" in df.columns:
-    problem_count = int((df["Data"] != "✅ Complete").sum())
-    if problem_count > 0:
+    failed_count = int(df["Data"].str.contains("⚠️ Fetch failed", regex=False).sum())
+    missing_count = int(df["Data"].str.contains("– No data", regex=False).sum())
+
+    if failed_count > 0:
         st.warning(
-            f"⚠️ {problem_count} stock(s) have missing or partial data (see the Data column). "
-            "Their Master Score uses only the data that was available. "
+            f"⚠️ {failed_count} stock(s) had a download fail (see the Data column). "
             "Press **Re-scan this universe** in the sidebar to retry. "
             "Only the missing pieces are fetched again."
+        )
+    if missing_count > 0:
+        st.caption(
+            "ℹ️ A dash (–) means that data does not exist for that stock (or could not be read). "
+            "It adds nothing to the Master Score. A **0.0** is a real score of zero."
         )
 
     wait_seconds = seconds_until_unblocked()
@@ -393,7 +487,7 @@ if not df.empty and "Data" in df.columns:
         )
 
 def color_scores(val):
-    if isinstance(val, (int, float)):
+    if isinstance(val, (int, float)) and not pd.isna(val):
         if val > 0:
             return 'color: #00FF00; font-weight: bold;'
         elif val < 0:
@@ -402,15 +496,11 @@ def color_scores(val):
             return 'color: gray;'
     return ''
 
-score_cols = ["Master Score", "Technicals (33%)", "Fundamentals (33%)", "Sentiment (34%)"]
-pillar_cols = ["Technicals (33%)", "Fundamentals (33%)", "Sentiment (34%)"]
-
 if not df.empty:
     styled_df = (
         df.style
         .map(color_scores, subset=score_cols)
-        .format("{:.1f}", subset=["Master Score"], na_rep="⚠️ failed")
-        .format("{:.0f}", subset=pillar_cols, na_rep="⚠️ failed")
+        .format("{:.1f}", subset=score_cols, na_rep="–")
     )
 
     event = st.dataframe(
@@ -419,7 +509,7 @@ if not df.empty:
         on_select="rerun",
         selection_mode="single-row"
     )
-    
+
     selected_rows = event.selection.rows
 else:
     selected_rows = []
@@ -427,25 +517,38 @@ else:
 # ============================================================
 # THE DRILL-DOWN BREAKDOWN UI
 # ============================================================
+def show_column_details(column_name, result, per_row=2):
+    """Shows one column's heading (with its scaled score) and its detail numbers."""
+    scaled = result.get("scaled")
+    score_text = "–" if scaled is None else f"{scaled:.1f}"
+    max_points = SCORE_COLUMNS[column_name]["scaled_max"]
+    st.markdown(f"**{column_name}: {score_text}** (range ±{max_points})")
+
+    cols = st.columns(per_row)
+    for idx, (key, val) in enumerate(result["details"].items()):
+        cols[idx % per_row].metric(label=key, value=str(val))
+
+
 if selected_rows:
     selected_idx = selected_rows[0]
     selected_stock = df.iloc[selected_idx]["Stock"]
     details = breakdown_data[selected_stock]
     selected_ticker = details["Ticker"]
+    columns = details["Columns"]
 
     st.divider()
-    
+
     # --- WATCHLIST TOGGLE UI ---
     col_title, col_button = st.columns([3, 1])
     with col_title:
         st.subheader(f"🔍 Deep Dive: {selected_stock}")
-        
+
     with col_button:
         is_saved = selected_stock in st.session_state.custom_watchlist
         # Buttons are switched off if the watchlist could not be loaded,
         # so we can never overwrite your real list with an empty one.
         watchlist_blocked = st.session_state.watchlist_status == "error"
-        
+
         if is_saved:
             if st.button("❌ Remove from Watchlist", use_container_width=True, disabled=watchlist_blocked):
                 def _remove(wl):
@@ -487,23 +590,20 @@ if selected_rows:
 
     with col1:
         with st.expander("📈 Technical Analysis", expanded=True):
+            tech_result = columns["Technicals"]
+            scaled = tech_result.get("scaled")
+            st.markdown(f"**Technicals: {'–' if scaled is None else f'{scaled:.1f}'}** (range ±{SCORE_COLUMNS['Technicals']['scaled_max']})")
             t_cols = st.columns(3)
-            idx = 0
-            for key, val in details["Technicals"].items():
+            for idx, (key, val) in enumerate(tech_result["details"].items()):
                 t_cols[idx % 3].metric(label=key, value=val)
-                idx += 1
 
         with st.expander("🏦 Fundamentals"):
-            f_cols = st.columns(2)
-            idx = 0
-            for key, val in details["Fundamentals"].items():
-                f_cols[idx % 2].metric(label=key, value=val)
-                idx += 1
+            for column_name in FUNDAMENTAL_COLUMNS:
+                show_column_details(column_name, columns[column_name])
+                st.markdown("---")
 
     with col2:
-        with st.expander("🧠 Sentiment", expanded=True):
-            s_cols = st.columns(2)
-            idx = 0
-            for key, val in details["Sentiment"].items():
-                s_cols[idx % 2].metric(label=key, value=val)
-                idx += 1
+        with st.expander("🧠 Options & Analyst Catalyst", expanded=True):
+            for column_name in MARKET_COLUMNS:
+                show_column_details(column_name, columns[column_name])
+                st.markdown("---")

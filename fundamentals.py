@@ -3,6 +3,28 @@ import pandas as pd
 from sector_map import TICKER_TRUE_SECTOR
 from yf_session import DataFetchError, get_ticker, get_daily_history, with_retry
 
+# ============================================================
+# THIS FILE NOW PRODUCES SIX SEPARATE COLUMNS
+#   Valuation, Growth, Profitability, Financial Health,
+#   Earnings Surprise, EPS Revision
+#
+# Every column returns a small "result" like this:
+#     {"score": number or None, "issue": None / "missing" / "failed", "details": {...}}
+#
+#   score = a real number (including a REAL zero) -> the app shows the number
+#   score = None                                   -> the app shows a dash "–"
+#   issue = "failed"  -> a download broke (worth a re-scan)
+#   issue = "missing" -> the data genuinely does not exist for this stock
+#
+# Columns with two sub-parts (Valuation, Growth, Profitability, Financial
+# Health): each sub-part is scored from -100 to +100 on its own, then the
+# two are ADDED (so the column can reach -200 to +200). A sub-part with no
+# data simply adds nothing. If BOTH sub-parts have no data, the column is
+# missing (dash).
+#
+# app.py scales these raw scores down to -2 to +2 in one place.
+# ============================================================
+
 SECTOR_EV_EBITDA_NEUTRAL = {
     "⛏️ Materials (XLB)": 11.59,
     "🏢 Real Estate (XLRE)": 20.01,
@@ -20,6 +42,14 @@ SECTOR_EV_EBITDA_NEUTRAL = {
 
 def _clip(value, low=-100, high=100):
     return max(low, min(high, value))
+
+
+def _pts(score):
+    """Text for a score inside the detail view. A real zero shows as 0.0, missing shows as a dash."""
+    if score is None:
+        return "–"
+    value = round(score, 1) + 0.0
+    return "0.0" if value == 0 else f"{value:+.1f}"
 
 
 # ============================================================
@@ -60,27 +90,52 @@ def _get_eps_trend(ticker_symbol):
 
 
 # ============================================================
-# SCORING HELPERS (pure maths on already-downloaded data)
+# SUB-PART HELPERS
+# Each returns a "part": (label, score, text, issue)
+#   score None + issue None      -> deliberately not applicable (adds nothing, not a problem)
+#   score None + issue "missing" -> data genuinely not available (adds nothing)
+#   score None + issue "failed"  -> a download broke (adds nothing)
 # ============================================================
+def _build_column(parts):
+    """Adds up the sub-parts. Missing sub-parts add nothing. If nothing was scored, the column is missing."""
+    scores = [score for _, score, _, _ in parts if score is not None]
+    issues = [issue for _, _, _, issue in parts if issue]
+
+    details = {}
+    for label, score, text, _ in parts:
+        details[label] = text if score is None else f"{text}  →  {_pts(score)} pts"
+
+    if not scores:
+        return {"score": None, "issue": "failed" if "failed" in issues else "missing", "details": details}
+
+    if "failed" in issues:
+        issue = "failed"
+    elif issues:
+        issue = "missing"
+    else:
+        issue = None
+    return {"score": sum(scores), "issue": issue, "details": details}
+
+
 def _get_ps_vs_own_history_score(ticker_symbol, current_ps):
     # May raise DataFetchError (price history download failed) — the caller handles it.
     df = get_daily_history(ticker_symbol)
     if len(df) < 100:
-        return 0, "P/S: Insufficient price history for own-average comparison"
+        return None, "P/S: Insufficient price history for own-average comparison"
 
     current_price = df['Close'].iloc[-1]
     if current_price <= 0 or current_ps <= 0:
-        return 0, "P/S: Invalid price/ratio data"
+        return None, "P/S: Invalid price/ratio data"
 
     implied_revenue_per_share = current_price / current_ps
     if implied_revenue_per_share <= 0:
-        return 0, "P/S: Could not derive implied revenue per share"
+        return None, "P/S: Could not derive implied revenue per share"
 
     approx_ps_series = df['Close'] / implied_revenue_per_share
     avg_ps = approx_ps_series.mean()
 
     if avg_ps <= 0:
-        return 0, "P/S: Invalid average"
+        return None, "P/S: Invalid average"
 
     ps_gap_pct = ((avg_ps - current_ps) / avg_ps) * 100
     score = _clip(ps_gap_pct * 2.5)
@@ -90,30 +145,117 @@ def _get_ps_vs_own_history_score(ticker_symbol, current_ps):
     return score, label
 
 
-def _get_ev_ebitda_score(ticker_symbol, ev_ebitda):
+def _pe_part(ticker_symbol, info):
+    trailing_pe = info.get('trailingPE')
+    forward_pe = info.get('forwardPE')
+    price_to_sales = info.get('priceToSalesTrailing12Months')
+    label = "Valuation: P/E"
+
+    if trailing_pe is not None and trailing_pe > 0:
+        if forward_pe is not None and forward_pe > 0:
+            pe_gap_pct = ((trailing_pe - forward_pe) / trailing_pe) * 100
+            score = _clip(pe_gap_pct * 1.6)
+            text = (f"Trailing P/E: {trailing_pe:.1f} vs Forward P/E: {forward_pe:.1f} "
+                    f"({'growth expected' if pe_gap_pct > 0 else 'contraction expected'})")
+            return (label, score, text, None)
+        return (label, None, f"Trailing P/E: {trailing_pe:.1f} (forward estimate unavailable)", "missing")
+
+    # No usable P/E: fall back to price-to-sales vs the stock's own 1-year average
+    if price_to_sales is not None and price_to_sales > 0:
+        try:
+            score, text = _get_ps_vs_own_history_score(ticker_symbol, price_to_sales)
+        except DataFetchError:
+            return (label, None, "⚠️ P/S check failed (price history unavailable)", "failed")
+        if score is None:
+            return (label, None, text, "missing")
+        return (label, score, text, None)
+
+    return (label, None, "No P/E or P/S data", "missing")
+
+
+def _ev_ebitda_part(ticker_symbol, ev_ebitda):
+    label = "Valuation: EV/EBITDA"
     sector = TICKER_TRUE_SECTOR.get(ticker_symbol)
     if sector is None:
-        return 0, "N/A (no sector mapped)"
+        return (label, None, "No sector mapped for this ticker (add it to sector_map.py)", "missing")
 
     sector_median = SECTOR_EV_EBITDA_NEUTRAL.get(sector)
     if sector_median is None:
-        return 0, f"N/A (EV/EBITDA not meaningful for {sector})"
+        # Deliberately not used for this sector (e.g. banks) — not a data problem
+        return (label, None, f"Not used for {sector} (EV/EBITDA is not meaningful here)", None)
 
     if ev_ebitda is None or ev_ebitda <= 0 or ev_ebitda > 100:
-        return 0, "No Data (EV/EBITDA not meaningful — near-zero/negative EBITDA)"
+        return (label, None, "EV/EBITDA not meaningful (missing, negative or extreme)", "missing")
 
-    ev_ebitda_gap_pct = ((sector_median - ev_ebitda) / sector_median) * 100
-    score = _clip(ev_ebitda_gap_pct * 1.0)
+    gap_pct = ((sector_median - ev_ebitda) / sector_median) * 100
+    score = _clip(gap_pct * 1.0)
 
-    direction = "cheaper" if ev_ebitda_gap_pct > 0 else "more expensive"
-    label = f"EV/EBITDA: {ev_ebitda:.1f} vs sector median: {sector_median:.1f} ({direction} than sector)"
-    return score, label
+    direction = "cheaper" if gap_pct > 0 else "more expensive"
+    text = f"EV/EBITDA: {ev_ebitda:.1f} vs sector median: {sector_median:.1f} ({direction} than sector)"
+    return (label, score, text, None)
 
 
+def _growth_parts(info):
+    revenue_growth = info.get('revenueGrowth')
+    earnings_growth = info.get('earningsGrowth')
+
+    if revenue_growth is not None:
+        rev_part = ("Growth: Revenue (YoY)", _clip(revenue_growth * 150), f"{revenue_growth*100:.1f}%", None)
+    else:
+        rev_part = ("Growth: Revenue (YoY)", None, "No Data", "missing")
+
+    if earnings_growth is not None:
+        clipped = max(-1.0, min(1.5, earnings_growth))
+        earn_part = ("Growth: Earnings (YoY)", _clip(clipped * 80), f"{earnings_growth*100:.1f}%", None)
+    else:
+        earn_part = ("Growth: Earnings (YoY)", None, "No Data", "missing")
+
+    return [rev_part, earn_part]
+
+
+def _profitability_parts(info):
+    net_margin = info.get('profitMargins')
+    roe = info.get('returnOnEquity')
+
+    if net_margin is not None:
+        margin_part = ("Profitability: Net Margin", _clip(net_margin * 200), f"{net_margin*100:.1f}%", None)
+    else:
+        margin_part = ("Profitability: Net Margin", None, "No Data", "missing")
+
+    if roe is not None:
+        clipped = max(-0.5, min(1.0, roe))
+        roe_part = ("Profitability: ROE", _clip(clipped * 110), f"{roe*100:.1f}%", None)
+    else:
+        roe_part = ("Profitability: ROE", None, "No Data", "missing")
+
+    return [margin_part, roe_part]
+
+
+def _health_parts(info):
+    debt_to_equity = info.get('debtToEquity')
+    current_ratio = info.get('currentRatio')
+
+    if debt_to_equity is not None:
+        clipped_de = max(0, min(400, debt_to_equity))
+        de_part = ("Health: Debt/Equity", _clip((100 - clipped_de) * 0.5), f"{debt_to_equity:.1f}", None)
+    else:
+        de_part = ("Health: Debt/Equity", None, "No Data", "missing")
+
+    if current_ratio is not None:
+        cr_part = ("Health: Current Ratio", _clip((current_ratio - 1.5) * 40), f"{current_ratio:.2f}", None)
+    else:
+        cr_part = ("Health: Current Ratio", None, "No Data", "missing")
+
+    return [de_part, cr_part]
+
+
+# ============================================================
+# EARNINGS SURPRISE and EPS REVISION (one number each)
+# ============================================================
 def _score_earnings_surprise(earnings_dates):
     reported = earnings_dates.dropna(subset=['Reported EPS'])
     if reported.empty:
-        return 0, "No Data"
+        return None, "No Data"
 
     reported = reported.sort_index(ascending=False)
     latest = reported.iloc[0]
@@ -123,10 +265,10 @@ def _score_earnings_surprise(earnings_dates):
     surprise_pct = latest.get('Surprise(%)')
 
     if surprise_pct is None or pd.isna(surprise_pct):
-        if eps_estimate is not None and eps_estimate != 0 and eps_reported is not None:
+        if eps_estimate is not None and not pd.isna(eps_estimate) and eps_estimate != 0 and eps_reported is not None:
             surprise_pct = ((eps_reported - eps_estimate) / abs(eps_estimate)) * 100
         else:
-            return 0, "No Data"
+            return None, "No Data"
 
     clipped_surprise = max(-100, min(150, surprise_pct))
     score = _clip(clipped_surprise * 1.8)
@@ -138,17 +280,17 @@ def _score_earnings_surprise(earnings_dates):
 
 def _score_eps_revision(eps_trend):
     if '0q' not in eps_trend.index:
-        return 0, "No Data"
+        return None, "No Data"
 
     row = eps_trend.loc['0q']
     current_est = row.get('current')
     past_est = row.get('30daysAgo')
 
     if current_est is None or past_est is None or pd.isna(current_est) or pd.isna(past_est):
-        return 0, "No Data"
+        return None, "No Data"
 
     if past_est == 0:
-        return 0, "No Data (zero baseline estimate)"
+        return None, "No Data (zero baseline estimate)"
 
     revision_pct = ((current_est - past_est) / abs(past_est)) * 100
 
@@ -160,9 +302,22 @@ def _score_eps_revision(eps_trend):
     return score, label
 
 
+def _single_value_column(label, fetch_function, score_function, ticker_symbol):
+    """Shared by Earnings Surprise and EPS Revision: one download, one number."""
+    try:
+        data = fetch_function(ticker_symbol)
+    except DataFetchError as e:
+        return {"score": None, "issue": "failed", "details": {label: f"⚠️ Fetch failed. {e}"}}
+
+    score, text = score_function(data)
+    if score is None:
+        return {"score": None, "issue": "missing", "details": {label: text}}
+    return {"score": score, "issue": None, "details": {label: f"{text}  →  {_pts(score)} pts"}}
+
+
 # ============================================================
 # EARNINGS COUNTDOWN (informational only — not part of the score)
-# Uses the same cached earnings dates as the fundamentals score, so it
+# Uses the same cached earnings dates as the Earnings Surprise column, so it
 # costs no extra Yahoo request. Raises DataFetchError if unavailable.
 # ============================================================
 def get_earnings_countdown(ticker_symbol):
@@ -182,136 +337,39 @@ def get_earnings_countdown(ticker_symbol):
 
 
 # ============================================================
-# MASTER FUNDAMENTAL SCORE
-# (Not cached itself: it only does quick maths on cached downloads.)
+# MASTER FUNDAMENTAL FUNCTION
+# Returns a dictionary with the six columns. (Not cached itself: it only
+# does quick maths on cached downloads.)
 #
-# What happens when data is missing:
-#   - Company info fails        -> raises DataFetchError (whole score fails)
-#   - Price history (P/S check) -> valuation uses the EV/EBITDA part only, with a note
-#   - Earnings surprise/EPS     -> that part is left out and the remaining parts
-#                                  share the weight, with a note
+# If the company info download fails, the first four columns fail, but
+# Earnings Surprise and EPS Revision still try on their own downloads.
 # ============================================================
-def calculate_fundamental_score(ticker_symbol):
-    info = _get_company_info(ticker_symbol)  # raises DataFetchError if Yahoo fails
+INFO_COLUMNS = ["Valuation", "Growth", "Profitability", "Financial Health"]
 
-    details = {}
-    notes = []
 
-    trailing_pe = info.get('trailingPE')
-    forward_pe = info.get('forwardPE')
-    price_to_sales = info.get('priceToSalesTrailing12Months')
-    ev_ebitda_raw = info.get('enterpriseToEbitda')
+def calculate_fundamental_columns(ticker_symbol):
+    results = {}
 
-    pe_ps_score = 0
-    if trailing_pe is not None and trailing_pe > 0:
-        if forward_pe is not None and forward_pe > 0:
-            pe_gap_pct = ((trailing_pe - forward_pe) / trailing_pe) * 100
-            pe_ps_score = _clip(pe_gap_pct * 1.6)
-            details["Valuation (P/E)"] = (
-                f"Trailing P/E: {trailing_pe:.1f} vs Forward P/E: {forward_pe:.1f} "
-                f"({'growth expected' if pe_gap_pct > 0 else 'contraction expected'})"
-            )
-        else:
-            pe_ps_score = 0
-            details["Valuation (P/E)"] = f"Trailing P/E: {trailing_pe:.1f} (forward estimate unavailable)"
-    else:
-        if price_to_sales is not None and price_to_sales > 0:
-            try:
-                pe_ps_score, ps_label = _get_ps_vs_own_history_score(ticker_symbol, price_to_sales)
-                details["Valuation (P/E)"] = ps_label
-            except DataFetchError:
-                pe_ps_score = None
-                details["Valuation (P/E)"] = "⚠️ P/S check failed (price history unavailable)"
-                notes.append("P/S price history unavailable (valuation uses EV/EBITDA only)")
-        else:
-            pe_ps_score = 0
-            details["Valuation (P/E)"] = "No Data"
-
-    ev_ebitda_score, ev_ebitda_label = _get_ev_ebitda_score(ticker_symbol, ev_ebitda_raw)
-    details["Valuation (EV/EBITDA)"] = ev_ebitda_label
-
-    if pe_ps_score is None:
-        valuation_score = ev_ebitda_score
-    else:
-        valuation_score = (pe_ps_score + ev_ebitda_score) / 2
-
-    revenue_growth = info.get('revenueGrowth')
-    earnings_growth = info.get('earningsGrowth')
-
-    rev_score = _clip(revenue_growth * 150) if revenue_growth is not None else 0
-
-    if earnings_growth is not None:
-        clipped_earnings_growth = max(-1.0, min(1.5, earnings_growth))
-        earn_score = _clip(clipped_earnings_growth * 80)
-    else:
-        earn_score = 0
-
-    growth_score = (rev_score + earn_score) / 2
-
-    details["Revenue Growth (YoY)"] = f"{revenue_growth*100:.1f}%" if revenue_growth is not None else "No Data"
-    details["Earnings Growth (YoY)"] = f"{earnings_growth*100:.1f}%" if earnings_growth is not None else "No Data"
-
-    net_margin = info.get('profitMargins')
-    roe = info.get('returnOnEquity')
-
-    margin_score = _clip(net_margin * 200) if net_margin is not None else 0
-
-    if roe is not None:
-        clipped_roe = max(-0.5, min(1.0, roe))
-        roe_score = _clip(clipped_roe * 110)
-    else:
-        roe_score = 0
-
-    profitability_score = (margin_score + roe_score) / 2
-
-    details["Net Margin"] = f"{net_margin*100:.1f}%" if net_margin is not None else "No Data"
-    details["ROE"] = f"{roe*100:.1f}%" if roe is not None else "No Data"
-
-    debt_to_equity = info.get('debtToEquity')
-    current_ratio = info.get('currentRatio')
-
-    if debt_to_equity is not None:
-        clipped_de = max(0, min(400, debt_to_equity))
-        de_score = _clip((100 - clipped_de) * 0.5)
-    else:
-        de_score = 0
-
-    cr_score = _clip((current_ratio - 1.5) * 40) if current_ratio is not None else 0
-
-    health_score = (de_score + cr_score) / 2
-
-    details["Debt/Equity"] = f"{debt_to_equity:.1f}" if debt_to_equity is not None else "No Data"
-    details["Current Ratio"] = f"{current_ratio:.2f}" if current_ratio is not None else "No Data"
-
-    # --- Earnings surprise & EPS revisions (each may fail on its own) ---
-    surprise_score = None
     try:
-        surprise_score, surprise_label = _score_earnings_surprise(_get_earnings_dates(ticker_symbol))
-    except DataFetchError:
-        surprise_label = "⚠️ Fetch failed (left out of the score)"
-        notes.append("Earnings surprise unavailable")
+        info = _get_company_info(ticker_symbol)
+    except DataFetchError as e:
+        info = None
+        for name in INFO_COLUMNS:
+            results[name] = {"score": None, "issue": "failed",
+                             "details": {"Company data": f"⚠️ Fetch failed. {e}"}}
 
-    revision_score = None
-    try:
-        revision_score, revision_label = _score_eps_revision(_get_eps_trend(ticker_symbol))
-    except DataFetchError:
-        revision_label = "⚠️ Fetch failed (left out of the score)"
-        notes.append("EPS revision unavailable")
+    if info is not None:
+        results["Valuation"] = _build_column([
+            _pe_part(ticker_symbol, info),
+            _ev_ebitda_part(ticker_symbol, info.get('enterpriseToEbitda')),
+        ])
+        results["Growth"] = _build_column(_growth_parts(info))
+        results["Profitability"] = _build_column(_profitability_parts(info))
+        results["Financial Health"] = _build_column(_health_parts(info))
 
-    details["Earnings Surprise"] = surprise_label
-    details["EPS Estimate Revision (30d)"] = revision_label
+    results["Earnings Surprise"] = _single_value_column(
+        "Earnings Surprise", _get_earnings_dates, _score_earnings_surprise, ticker_symbol)
+    results["EPS Revision"] = _single_value_column(
+        "EPS Estimate Revision (30d)", _get_eps_trend, _score_eps_revision, ticker_symbol)
 
-    surprise_parts = [s for s in (surprise_score, revision_score) if s is not None]
-    financial_surprise_score = sum(surprise_parts) / len(surprise_parts) if surprise_parts else None
-
-    # --- Combine the five pillars (equal weight, shared among whichever are available) ---
-    pillar_scores = [valuation_score, growth_score, profitability_score, health_score]
-    if financial_surprise_score is not None:
-        pillar_scores.append(financial_surprise_score)
-
-    final_score = sum(pillar_scores) / len(pillar_scores)
-
-    if notes:
-        details["⚠️ Data Notes"] = "; ".join(notes)
-
-    return _clip(final_score), details
+    return results
