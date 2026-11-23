@@ -269,6 +269,7 @@ with st.sidebar:
     st.caption("🚀 Bullish Momentum &nbsp;&nbsp; 🎯 Bullish Pullback")
     st.caption("⚡ Bearish Momentum &nbsp;&nbsp; 🎯 Bearish Pullback")
     st.caption("➖ No Clear 4H Setup &nbsp;&nbsp; ❓ Technical data missing")
+    st.caption("⚠️ Overextended (daily or 4H)")
     st.markdown("---")
     st.caption("**Reading the score columns**")
     st.caption("**0.0** = a real score of zero (neutral)")
@@ -282,22 +283,25 @@ st.divider()
 # ============================================================
 def get_setup_icon(tech_score, tech_details):
     """
-    Combines the technical score's direction with the 4H Trading Mode.
-    Unified Pullback Icon: 🎯 used for both bull and bear pullbacks.
+    Temporary icon rules until the simplified regime labels are ready.
+    Uses the 4H regime, plus a warning if either timeframe is overextended.
     ❓ means the technical data (or its 4H part) could not be fetched.
     """
     if tech_score is None:
         return "❓"
 
-    mode = tech_details.get("4H Trading Mode", "Neutral")
+    daily = tech_details.get("Daily Regime", "Neutral")
+    h4 = tech_details.get("4H Regime", "Neutral")
 
-    if mode == "Unavailable":
+    if h4 == "Unavailable":
         return "❓"
-    elif mode == "Pullback":
+    elif daily == "Overextended" or h4 == "Overextended":
+        return "⚠️"
+    elif h4 == "Pullback":
         return "🎯"
-    elif tech_score > 0 and mode == "Momentum":
+    elif tech_score > 0 and h4 == "Momentum":
         return "🚀"
-    elif tech_score < 0 and mode == "Momentum":
+    elif tech_score < 0 and h4 == "Momentum":
         return "⚡"
     else:
         return "➖"
@@ -314,7 +318,7 @@ def failed_result(message):
 
 def run_technical(ticker):
     try:
-        score, details = calculate_technical_score(ticker, category_name=selected_category)
+        score, details = calculate_technical_score(ticker)
     except DataFetchError as e:
         return failed_result(f"Data fetch failed. {e}")
     except Exception as e:
@@ -430,6 +434,7 @@ if "last_scanned_category" not in st.session_state or st.session_state.last_scan
                 "Stock": name,
                 "Master Score": master_score,
                 "Bias Status": get_bias_label(master_score),
+                "Regime": columns["Technicals"]["details"].get("Combined Regime", "–"),
             }
             for column_name in SCORE_COLUMNS:
                 row[column_label(column_name)] = columns[column_name]["scaled"]
@@ -517,7 +522,14 @@ else:
 # ============================================================
 # THE DRILL-DOWN BREAKDOWN UI
 # ============================================================
-def show_column_details(column_name, result, per_row=2):
+def show_detail_item(label, value):
+    """Shows a small label with its value underneath. Long text wraps instead of being cut off."""
+    safe_value = str(value).replace("$", "\\$")   # stops a "$" being read as maths
+    st.caption(label)
+    st.markdown(f"**{safe_value}**")
+
+
+def show_column_details(column_name, result, per_row=1):
     """Shows one column's heading (with its scaled score) and its detail numbers."""
     scaled = result.get("scaled")
     score_text = "–" if scaled is None else f"{scaled:.1f}"
@@ -526,7 +538,8 @@ def show_column_details(column_name, result, per_row=2):
 
     cols = st.columns(per_row)
     for idx, (key, val) in enumerate(result["details"].items()):
-        cols[idx % per_row].metric(label=key, value=str(val))
+        with cols[idx % per_row]:
+            show_detail_item(key, val)
 
 
 if selected_rows:
@@ -593,9 +606,10 @@ if selected_rows:
             tech_result = columns["Technicals"]
             scaled = tech_result.get("scaled")
             st.markdown(f"**Technicals: {'–' if scaled is None else f'{scaled:.1f}'}** (range ±{SCORE_COLUMNS['Technicals']['scaled_max']})")
-            t_cols = st.columns(3)
+            t_cols = st.columns(2)
             for idx, (key, val) in enumerate(tech_result["details"].items()):
-                t_cols[idx % 3].metric(label=key, value=val)
+                with t_cols[idx % 2]:
+                    show_detail_item(key, val)
 
         with st.expander("🏦 Fundamentals"):
             for column_name in FUNDAMENTAL_COLUMNS:
