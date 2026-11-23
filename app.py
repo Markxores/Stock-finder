@@ -266,10 +266,10 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption("**Setup Icon Legend**")
-    st.caption("🚀 Bullish Momentum &nbsp;&nbsp; 🎯 Bullish Pullback")
-    st.caption("⚡ Bearish Momentum &nbsp;&nbsp; 🎯 Bearish Pullback")
-    st.caption("➖ No Clear 4H Setup &nbsp;&nbsp; ❓ Technical data missing")
-    st.caption("⚠️ Overextended (daily or 4H)")
+    st.caption("🚀 Upward Momentum &nbsp;&nbsp; ⚡ Downward Momentum")
+    st.caption("🎯 Pullback (bullish or bearish)")
+    st.caption("⚠️ Overextended (daily) &nbsp;&nbsp; ➖ Neutral")
+    st.caption("❓ Technical data missing")
     st.markdown("---")
     st.caption("**Reading the score columns**")
     st.caption("**0.0** = a real score of zero (neutral)")
@@ -283,25 +283,22 @@ st.divider()
 # ============================================================
 def get_setup_icon(tech_score, tech_details):
     """
-    Temporary icon rules until the simplified regime labels are ready.
-    Uses the 4H regime, plus a warning if either timeframe is overextended.
-    ❓ means the technical data (or its 4H part) could not be fetched.
+    The icon follows the FINAL regime label from technical.py
+    ("Regime Type": Momentum, Pullback, Overextended or Neutral).
+    ❓ means the technical data could not be fetched.
     """
     if tech_score is None:
         return "❓"
 
-    daily = tech_details.get("Daily Regime", "Neutral")
-    h4 = tech_details.get("4H Regime", "Neutral")
+    regime_type = tech_details.get("Regime Type", "Neutral")
 
-    if h4 == "Unavailable":
-        return "❓"
-    elif daily == "Overextended" or h4 == "Overextended":
+    if regime_type == "Overextended":
         return "⚠️"
-    elif h4 == "Pullback":
+    elif regime_type == "Pullback":
         return "🎯"
-    elif tech_score > 0 and h4 == "Momentum":
+    elif regime_type == "Momentum" and tech_score > 0:
         return "🚀"
-    elif tech_score < 0 and h4 == "Momentum":
+    elif regime_type == "Momentum" and tech_score < 0:
         return "⚡"
     else:
         return "➖"

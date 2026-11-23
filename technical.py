@@ -46,38 +46,70 @@ POINTS_PERFECT_ORDER = 40    # +40 if FAST > MID > SLOW, -40 if FAST < MID < SLO
 SECTOR_INFLUENCE = 0.15
 
 # --- Regime settings (used on BOTH the daily and the 4H chart) ---
-OVEREXTENDED_RSI_HIGH = 70   # in an uptrend, RSI above this = Overextended
-OVEREXTENDED_RSI_LOW = 30    # in a downtrend, RSI below this = Overextended
+RSI_STRETCHED_HIGH = 70   # RSI above this = stretched upward
+RSI_STRETCHED_LOW = 30    # RSI below this = stretched downward
+
+# A timeframe that is moving hard AGAINST the trend (for example a sharp
+# drop inside an uptrend) reads Neutral. This is how strong that move must
+# be (0 to 100) before it counts. Lower = more things read Neutral.
+AGAINST_TREND_NEUTRAL_AT = 60
 
 
 # ============================================================
-# REGIME LABELS
-# The left side is the name the code uses. The right side is the text
-# you see on screen. When you send me your simplified labels, we can
-# change the right-hand side here (or fill in COMBINED_REGIME_LABELS).
+# THE FINAL REGIME LABEL (how the daily and 4H regimes combine)
+#
+# Rules, in this order (the first one that applies wins):
+#   1. No trend direction (trend score of exactly 0)  -> Neutral
+#   2. Daily regime is Overextended                   -> Overextended
+#                                                       (the 4H is ignored)
+#   3. Daily and 4H are both Momentum                 -> Momentum
+#   4. One is Pullback and the other is Momentum
+#      or Pullback                                    -> Pullback
+#   5. Anything else (a Neutral is involved)          -> the DAILY regime decides
+#
+# The 4H regime never says "Overextended". When the 4H is stretched in
+# the direction of the trend it counts as Momentum.
 # ============================================================
-REGIME_LABELS = {
-    "Momentum": "Momentum",
-    "Pullback": "Pullback",
-    "Overextended": "Overextended",
-    "Neutral": "Neutral",
-    "Unavailable": "Unavailable",
+
+# The text shown on screen. Change the right-hand side to rename a label.
+# The key is (trend direction, regime type).
+FINAL_LABELS = {
+    (1, "Momentum"): "Upward Momentum",
+    (1, "Pullback"): "Bullish Pullback",
+    (1, "Overextended"): "Overextended (Up)",
+    (-1, "Momentum"): "Downward Momentum",
+    (-1, "Pullback"): "Bearish Pullback",
+    (-1, "Overextended"): "Overextended (Down)",
 }
+NEUTRAL_LABEL = "Neutral"
 
-# Fill this in later with your own labels. The key is
-# (trend direction, daily regime, 4H regime), for example:
-#     (1, "Momentum", "Pullback"): "Healthy dip in a strong uptrend",
-# Anything not listed here falls back to a plain automatic label.
-COMBINED_REGIME_LABELS = {}
+
+def get_final_regime(direction, daily_regime, h4_regime):
+    """
+    Combines the daily and 4H regimes into ONE regime type:
+    "Momentum", "Pullback", "Overextended" or "Neutral".
+    """
+    if direction == 0:
+        return "Neutral"
+    if daily_regime == "Overextended":
+        return "Overextended"
+    if daily_regime == "Momentum" and h4_regime == "Momentum":
+        return "Momentum"
+    if "Pullback" in (daily_regime, h4_regime) and h4_regime in ("Momentum", "Pullback") and daily_regime in ("Momentum", "Pullback"):
+        return "Pullback"
+    # A Neutral is involved (or the 4H is unavailable): the daily regime decides
+    return daily_regime
 
 
 def get_combined_regime_label(direction, daily_regime, h4_regime):
-    """Turns the daily + 4H regimes into one short piece of text for the table."""
-    custom = COMBINED_REGIME_LABELS.get((direction, daily_regime, h4_regime))
-    if custom:
-        return custom
-    arrow = "▲" if direction > 0 else ("▼" if direction < 0 else "•")
-    return f"{arrow} Daily {REGIME_LABELS[daily_regime]} / 4H {REGIME_LABELS[h4_regime]}"
+    """Returns (regime_type, text_for_the_table)."""
+    regime_type = get_final_regime(direction, daily_regime, h4_regime)
+    text = FINAL_LABELS.get((direction, regime_type), NEUTRAL_LABEL)
+
+    # If the 4H could not be downloaded, the daily regime decided alone. Say so.
+    if h4_regime == "Unavailable" and regime_type != "Overextended" and direction != 0:
+        text += " (no 4H data)"
+    return regime_type, text
 
 
 # ============================================================
@@ -222,32 +254,49 @@ def _pullback_strength(c, prev, direction):
     return s
 
 
-def calculate_regime(df, direction):
+def calculate_regime(df, direction, is_daily):
     """
     Works out the regime for ONE timeframe.
       df        = price table that already has the regime indicators
       direction = +1 (uptrend), -1 (downtrend) or 0 (no trend)
+      is_daily  = True for the daily chart, False for the 4H chart
     Returns (regime_name, momentum_strength, pullback_strength, last_row)
 
-    Order of checks:
-      1. Overextended: RSI is stretched in the direction of the trend
-      2. Otherwise whichever of Momentum / Pullback is stronger (a tie goes to Momentum)
-      3. If both are zero: Neutral
+    Order of checks (the first one that applies wins):
+      1. RSI stretched IN the direction of the trend (above 70 in an uptrend,
+         below 30 in a downtrend):
+            daily -> "Overextended"
+            4H    -> "Momentum"  (the 4H never says Overextended)
+      2. Moving AGAINST the trend (RSI stretched the other way, or a strong
+         counter-move, e.g. a sharp drop inside an uptrend) -> "Neutral"
+      3. Whichever of Momentum / Pullback is stronger (a tie goes to Momentum)
+      4. If both are zero -> "Neutral"
     """
     if df is None or len(df) < 5 or direction == 0:
         return "Neutral", 0, 0, None
 
     c = df.iloc[-1]
     prev = df.iloc[-2]
+    rsi = c['RSI_14']
 
     momentum = _momentum_strength(c, prev, direction)
     pullback = _pullback_strength(c, prev, direction)
+    # Same momentum check, but looking the OPPOSITE way (against the trend)
+    against_trend = _momentum_strength(c, prev, -direction)
 
-    if direction > 0 and c['RSI_14'] > OVEREXTENDED_RSI_HIGH:
-        return "Overextended", momentum, pullback, c
-    if direction < 0 and c['RSI_14'] < OVEREXTENDED_RSI_LOW:
-        return "Overextended", momentum, pullback, c
+    # 1. Stretched in the direction of the trend
+    stretched_with_trend = (direction > 0 and rsi > RSI_STRETCHED_HIGH) or \
+                           (direction < 0 and rsi < RSI_STRETCHED_LOW)
+    if stretched_with_trend:
+        return ("Overextended" if is_daily else "Momentum"), momentum, pullback, c
 
+    # 2. Moving hard against the trend
+    stretched_against_trend = (direction > 0 and rsi < RSI_STRETCHED_LOW) or \
+                              (direction < 0 and rsi > RSI_STRETCHED_HIGH)
+    if stretched_against_trend or against_trend >= AGAINST_TREND_NEUTRAL_AT:
+        return "Neutral", momentum, pullback, c
+
+    # 3 and 4. Momentum, Pullback or Neutral
     if momentum == 0 and pullback == 0:
         return "Neutral", momentum, pullback, c
     if momentum >= pullback:
@@ -258,7 +307,7 @@ def calculate_regime(df, direction):
 def get_daily_regime(ticker_symbol, direction):
     """Daily regime. Uses the same cached daily download as the trend score (no extra Yahoo request)."""
     df = _add_regime_indicators(get_daily_history(ticker_symbol))
-    return calculate_regime(df, direction)
+    return calculate_regime(df, direction, is_daily=True)
 
 
 # ============================================================
@@ -362,7 +411,7 @@ def calculate_technical_score(ticker_symbol):
     if df4h is None:
         h4_regime, h4_mom, h4_pull, h4_row = "Unavailable", 0, 0, None
     else:
-        h4_regime, h4_mom, h4_pull, h4_row = calculate_regime(df4h, direction)
+        h4_regime, h4_mom, h4_pull, h4_row = calculate_regime(df4h, direction, is_daily=False)
 
     # --- Sector nudge (FIXED) ---
     # "direction" flips the sign for a bearish stock, so:
@@ -390,12 +439,16 @@ def calculate_technical_score(ticker_symbol):
 
     final_score = max(-100, min(100, trend_score * sector_modifier))
 
+    # --- Final regime label ---
+    regime_type, regime_text = get_combined_regime_label(direction, daily_regime, h4_regime)
+
     # --- Details shown in the Deep Dive ---
     details = {
         **trend_details,
+        "Combined Regime": regime_text,
+        "Regime Type": regime_type,
         "Daily Regime": daily_regime,
         "4H Regime": h4_regime,
-        "Combined Regime": get_combined_regime_label(direction, daily_regime, h4_regime),
         "Trend Score (before sector)": round(trend_score, 1),
         "Sector Modifier": sector_label,
         "Daily Momentum Strength": daily_mom,
