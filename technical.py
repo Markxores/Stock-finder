@@ -267,8 +267,13 @@ def calculate_regime(df, direction, is_daily):
          below 30 in a downtrend):
             daily -> "Overextended"
             4H    -> "Momentum"  (the 4H never says Overextended)
-      2. Moving AGAINST the trend (RSI stretched the other way, or a strong
-         counter-move, e.g. a sharp drop inside an uptrend) -> "Neutral"
+      2. Moving AGAINST the trend -> "Neutral", in two cases:
+            - RSI is stretched the other way (below 30 in an uptrend,
+              above 70 in a downtrend), always Neutral
+            - a strong counter-move (e.g. a sharp drop inside an uptrend)
+              that scores AGAINST_TREND_NEUTRAL_AT or more, UNLESS the
+              pullback score is higher than that counter-move score
+              (a tie stays Neutral)
       3. Whichever of Momentum / Pullback is stronger (a tie goes to Momentum)
       4. If both are zero -> "Neutral"
     """
@@ -293,7 +298,11 @@ def calculate_regime(df, direction, is_daily):
     # 2. Moving hard against the trend
     stretched_against_trend = (direction > 0 and rsi < RSI_STRETCHED_LOW) or \
                               (direction < 0 and rsi > RSI_STRETCHED_HIGH)
-    if stretched_against_trend or against_trend >= AGAINST_TREND_NEUTRAL_AT:
+    if stretched_against_trend:
+        return "Neutral", momentum, pullback, c
+    # A strong move against the trend reads Neutral, UNLESS the pullback
+    # score is higher than it (then the pullback takes precedence).
+    if against_trend >= AGAINST_TREND_NEUTRAL_AT and pullback <= against_trend:
         return "Neutral", momentum, pullback, c
 
     # 3 and 4. Momentum, Pullback or Neutral
