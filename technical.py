@@ -4,9 +4,84 @@ from sector_map import TICKER_TRUE_SECTOR
 from yf_session import DataFetchError, get_ticker, get_daily_history, with_retry
 
 # ============================================================
+# HOW THIS FILE WORKS NOW (two separate jobs)
+#
+#   JOB 1 - TREND SCORE (feeds the Master Score)
+#     Daily chart only. Moving averages only. No RSI, no MACD.
+#     Range: -100 to +100. Then nudged by the sector (see below).
+#
+#   JOB 2 - REGIME (a label for your eyes only, NOT in the score)
+#     Calculated twice: once on the daily chart, once on the 4H chart.
+#     Each one says: Momentum / Pullback / Overextended / Neutral.
+#     The daily regime uses RSI + MACD + ATR (the parts that were
+#     taken OUT of the score). The 4H regime uses the same logic.
+#
+#   Both regimes use the TREND SCORE to know which direction the
+#   stock is trending (up = +1, down = -1).
+# ============================================================
+
+
+# ============================================================
+# SETTINGS YOU CAN TUNE
+# These are the numbers we will optimize later. Change them here
+# and nothing else in the file needs to change.
+# ============================================================
+
+# --- Trend score: the moving average lengths (in days) ---
+MA_FAST = 20      # fast exponential moving average (EMA)
+MA_MID = 50       # middle simple moving average (SMA)
+MA_SLOW = 200     # slow simple moving average (SMA)
+
+# --- Trend score: how many points each check is worth ---
+# Add them up: 20 + 20 + 20 + 40 = 100, so the score runs -100 to +100.
+# (Each check gives +points if true, -points if false.)
+POINTS_PRICE_VS_FAST = 20
+POINTS_PRICE_VS_MID = 20
+POINTS_PRICE_VS_SLOW = 20
+POINTS_PERFECT_ORDER = 40    # +40 if FAST > MID > SLOW, -40 if FAST < MID < SLOW, else 0
+
+# --- Sector nudge ---
+# 0.15 means a perfect sector can change the score by up to 15% of the
+# sector's strength (sector score runs -70 to +70, so about +/-10.5% at most).
+SECTOR_INFLUENCE = 0.15
+
+# --- Regime settings (used on BOTH the daily and the 4H chart) ---
+OVEREXTENDED_RSI_HIGH = 70   # in an uptrend, RSI above this = Overextended
+OVEREXTENDED_RSI_LOW = 30    # in a downtrend, RSI below this = Overextended
+
+
+# ============================================================
+# REGIME LABELS
+# The left side is the name the code uses. The right side is the text
+# you see on screen. When you send me your simplified labels, we can
+# change the right-hand side here (or fill in COMBINED_REGIME_LABELS).
+# ============================================================
+REGIME_LABELS = {
+    "Momentum": "Momentum",
+    "Pullback": "Pullback",
+    "Overextended": "Overextended",
+    "Neutral": "Neutral",
+    "Unavailable": "Unavailable",
+}
+
+# Fill this in later with your own labels. The key is
+# (trend direction, daily regime, 4H regime), for example:
+#     (1, "Momentum", "Pullback"): "Healthy dip in a strong uptrend",
+# Anything not listed here falls back to a plain automatic label.
+COMBINED_REGIME_LABELS = {}
+
+
+def get_combined_regime_label(direction, daily_regime, h4_regime):
+    """Turns the daily + 4H regimes into one short piece of text for the table."""
+    custom = COMBINED_REGIME_LABELS.get((direction, daily_regime, h4_regime))
+    if custom:
+        return custom
+    arrow = "▲" if direction > 0 else ("▼" if direction < 0 else "•")
+    return f"{arrow} Daily {REGIME_LABELS[daily_regime]} / 4H {REGIME_LABELS[h4_regime]}"
+
+
+# ============================================================
 # SECTOR ETF MAPPING
-# Curated baskets (Mega-Cap, Momentum, Dividend, etc.) intentionally
-# have no entry here — they'll fall through to "no adjustment"
 # ============================================================
 SECTOR_ETF_MAPPING = {
     "💻 Information Technology (XLK)": "XLK",
@@ -23,107 +98,60 @@ SECTOR_ETF_MAPPING = {
 }
 
 # ============================================================
-# HOW FAILURES WORK IN THIS FILE
+# HOW FAILURES WORK IN THIS FILE (unchanged)
 #   - If Yahoo fails (after retrying), the function raises DataFetchError.
 #     Streamlit never saves a function that raised an error, so a failed
 #     lookup is NOT remembered. The next scan tries again.
-#   - The caching sits on the raw downloads, not on the final score, so a
-#     half-failed score can never be saved either.
-#
-# CHANGE IN THIS VERSION:
-#   - If a stock has fewer than 200 days of price history, the daily score
-#     is now None (MISSING), instead of a fake 0. The app shows a dash.
+#   - If a stock has fewer days of history than the slow moving average
+#     needs, the trend score is None (MISSING, shown as a dash).
 # ============================================================
 
 
 # ============================================================
-# DAILY TREND SCORE
+# JOB 1: DAILY TREND SCORE (moving averages only)
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def calculate_daily_trend_score(ticker_symbol):
+def calculate_trend_score(ticker_symbol):
     df = get_daily_history(ticker_symbol)  # raises DataFetchError if Yahoo fails
-    if len(df) < 200:
+    if len(df) < MA_SLOW:
         return None, {"⚠️ STATUS": "Insufficient History"}
 
-    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200).mean()
-
-    delta = df['Close'].diff()
-    gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    rs = gain / loss
-    df['RSI_14'] = 100 - (100 / (1 + rs))
-
-    ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
-    ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD_12_26_9'] = ema_12 - ema_26
-    df['MACDs_12_26_9'] = df['MACD_12_26_9'].ewm(span=9, adjust=False).mean()
-    df['MACDh_12_26_9'] = df['MACD_12_26_9'] - df['MACDs_12_26_9']
-
-    current = df.iloc[-1]
-    close = current['Close']
-    ema_20 = current['EMA_20']
-    sma_50 = current['SMA_50']
-    sma_200 = current['SMA_200']
-    rsi_14 = current['RSI_14']
-    macd_hist = current['MACDh_12_26_9']
+    ema_fast = df['Close'].ewm(span=MA_FAST, adjust=False).mean().iloc[-1]
+    sma_mid = df['Close'].rolling(window=MA_MID).mean().iloc[-1]
+    sma_slow = df['Close'].rolling(window=MA_SLOW).mean().iloc[-1]
+    close = df['Close'].iloc[-1]
 
     score = 0
-    score += 10 if close > ema_20 else -10
-    score += 10 if close > sma_50 else -10
-    score += 10 if close > sma_200 else -10
+    score += POINTS_PRICE_VS_FAST if close > ema_fast else -POINTS_PRICE_VS_FAST
+    score += POINTS_PRICE_VS_MID if close > sma_mid else -POINTS_PRICE_VS_MID
+    score += POINTS_PRICE_VS_SLOW if close > sma_slow else -POINTS_PRICE_VS_SLOW
 
-    if ema_20 > sma_50 and sma_50 > sma_200: score += 20
-    elif ema_20 < sma_50 and sma_50 < sma_200: score -= 20
-
-    if rsi_14 > 70: score -= 25
-    elif rsi_14 < 30: score += 25
-    elif rsi_14 > 50: score += 15
-    else: score -= 15
-
-    if macd_hist > 0: score += 25
-    else: score -= 25
+    if ema_fast > sma_mid and sma_mid > sma_slow:
+        score += POINTS_PERFECT_ORDER
+    elif ema_fast < sma_mid and sma_mid < sma_slow:
+        score -= POINTS_PERFECT_ORDER
 
     details = {
         "Close Price": round(close, 4),
-        "EMA 20": round(ema_20, 4),
-        "SMA 50": round(sma_50, 4),
-        "SMA 200": round(sma_200, 4),
-        "RSI (14)": round(rsi_14, 2),
-        "MACD Hist": round(macd_hist, 4)
+        f"EMA {MA_FAST}": round(ema_fast, 4),
+        f"SMA {MA_MID}": round(sma_mid, 4),
+        f"SMA {MA_SLOW}": round(sma_slow, 4),
     }
     return max(-100, min(100, score)), details
 
 
 # ============================================================
-# 4H DATA + INDICATORS
+# JOB 2: REGIME (shared by the daily chart and the 4H chart)
 # ============================================================
-@st.cache_data(ttl=1800, show_spinner=False)
-@with_retry(max_retries=2, delay_seconds=2)
-def _download_1h_history(ticker_symbol):
-    df = get_ticker(ticker_symbol).history(period="60d", interval="1h")
-    if df is None or df.empty:
-        raise ValueError(f"No hourly price history returned for {ticker_symbol}")
-    return df
-
-
-def get_4h_indicators(ticker_symbol):
+def _add_regime_indicators(df):
     """
-    Returns the 4H table, or None if there are too few candles to use.
-    Raises DataFetchError if the hourly download itself failed.
+    Adds the indicators the regime needs: a 20-period EMA, RSI(14),
+    MACD histogram and ATR(14). Works on any timeframe.
+    (The regime's EMA 20 is separate from the trend score's moving
+    averages, so optimizing the trend score will not change the regime.)
     """
-    df_1h = _download_1h_history(ticker_symbol)
-
-    df = df_1h.resample('4h').agg({
-        'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-    }).dropna()
-
-    if len(df) < 60:
-        return None
-
+    df = df.copy()
     df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
 
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
@@ -142,80 +170,128 @@ def get_4h_indicators(ticker_symbol):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR_14'] = tr.rolling(14).mean()
 
-    return df.dropna()
+    return df.dropna(subset=['EMA_20', 'RSI_14', 'MACD_hist', 'ATR_14'])
 
 
-# ============================================================
-# 4H MOMENTUM SCORE
-# ============================================================
-def calculate_4h_momentum_score(df4h, daily_direction):
-    if df4h is None or len(df4h) < 5 or daily_direction == 0:
-        return 0
-
-    c = df4h.iloc[-1]
-    prev = df4h.iloc[-2]
-    score = 0
-
-    if daily_direction > 0:
+def _momentum_strength(c, prev, direction):
+    """0 to 100: how strongly the chart is moving WITH the trend right now."""
+    s = 0
+    if direction > 0:
         if c['Close'] > c['EMA_20'] and c['EMA_20'] > prev['EMA_20']:
-            score += 30
+            s += 30
         if c['RSI_14'] > 55 and c['RSI_14'] > prev['RSI_14']:
-            score += 30
+            s += 30
         if c['MACD_hist'] > 0 and c['MACD_hist'] > prev['MACD_hist']:
-            score += 40
+            s += 40
     else:
         if c['Close'] < c['EMA_20'] and c['EMA_20'] < prev['EMA_20']:
-            score += 30
+            s += 30
         if c['RSI_14'] < 45 and c['RSI_14'] < prev['RSI_14']:
-            score += 30
+            s += 30
         if c['MACD_hist'] < 0 and c['MACD_hist'] < prev['MACD_hist']:
-            score += 40
-        score = -score
-
-    return max(-100, min(100, score))
+            s += 40
+    return s
 
 
-# ============================================================
-# 4H PULLBACK SCORE
-# ============================================================
-def calculate_4h_pullback_score(df4h, daily_direction):
-    if df4h is None or len(df4h) < 5 or daily_direction == 0:
-        return 0
-
-    c = df4h.iloc[-1]
-    prev = df4h.iloc[-2]
+def _pullback_strength(c, prev, direction):
+    """0 to 100: how much the chart looks like a dip (or bounce) that is turning back WITH the trend."""
     atr = c['ATR_14']
     if atr == 0 or pd.isna(atr):
         return 0
 
     dist_from_ema20_atr = (c['Close'] - c['EMA_20']) / atr
-    score = 0
-
-    if daily_direction > 0:
+    s = 0
+    if direction > 0:
         if -1.5 <= dist_from_ema20_atr <= 0.5:
-            score += 30
+            s += 30
         if 30 <= c['RSI_14'] <= 50:
-            score += 30
+            s += 30
         if c['RSI_14'] > prev['RSI_14']:
-            score += 20
+            s += 20
         if c['MACD_hist'] > prev['MACD_hist']:
-            score += 20
+            s += 20
     else:
         if -0.5 <= dist_from_ema20_atr <= 1.5:
-            score += 30
+            s += 30
         if 50 <= c['RSI_14'] <= 70:
-            score += 30
+            s += 30
         if c['RSI_14'] < prev['RSI_14']:
-            score += 20
+            s += 20
         if c['MACD_hist'] < prev['MACD_hist']:
-            score += 20
-        score = -score
+            s += 20
+    return s
 
-    return max(-100, min(100, score))
+
+def calculate_regime(df, direction):
+    """
+    Works out the regime for ONE timeframe.
+      df        = price table that already has the regime indicators
+      direction = +1 (uptrend), -1 (downtrend) or 0 (no trend)
+    Returns (regime_name, momentum_strength, pullback_strength, last_row)
+
+    Order of checks:
+      1. Overextended: RSI is stretched in the direction of the trend
+      2. Otherwise whichever of Momentum / Pullback is stronger (a tie goes to Momentum)
+      3. If both are zero: Neutral
+    """
+    if df is None or len(df) < 5 or direction == 0:
+        return "Neutral", 0, 0, None
+
+    c = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    momentum = _momentum_strength(c, prev, direction)
+    pullback = _pullback_strength(c, prev, direction)
+
+    if direction > 0 and c['RSI_14'] > OVEREXTENDED_RSI_HIGH:
+        return "Overextended", momentum, pullback, c
+    if direction < 0 and c['RSI_14'] < OVEREXTENDED_RSI_LOW:
+        return "Overextended", momentum, pullback, c
+
+    if momentum == 0 and pullback == 0:
+        return "Neutral", momentum, pullback, c
+    if momentum >= pullback:
+        return "Momentum", momentum, pullback, c
+    return "Pullback", momentum, pullback, c
+
+
+def get_daily_regime(ticker_symbol, direction):
+    """Daily regime. Uses the same cached daily download as the trend score (no extra Yahoo request)."""
+    df = _add_regime_indicators(get_daily_history(ticker_symbol))
+    return calculate_regime(df, direction)
 
 
 # ============================================================
-# SECTOR BENCHMARK SCORE
+# 4H DATA (only used for the 4H regime)
+# ============================================================
+@st.cache_data(ttl=1800, show_spinner=False)
+@with_retry(max_retries=2, delay_seconds=2)
+def _download_1h_history(ticker_symbol):
+    df = get_ticker(ticker_symbol).history(period="60d", interval="1h")
+    if df is None or df.empty:
+        raise ValueError(f"No hourly price history returned for {ticker_symbol}")
+    return df
+
+
+def get_4h_indicators(ticker_symbol):
+    """
+    Returns the 4H table with regime indicators, or None if there are too few candles.
+    Raises DataFetchError if the hourly download itself failed.
+    """
+    df_1h = _download_1h_history(ticker_symbol)
+
+    df = df_1h.resample('4h').agg({
+        'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+    }).dropna()
+
+    if len(df) < 60:
+        return None
+
+    return _add_regime_indicators(df)
+
+
+# ============================================================
+# SECTOR BENCHMARK SCORE (unchanged)
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def calculate_sector_score(sector_etf_ticker):
@@ -252,52 +328,48 @@ def calculate_sector_score(sector_etf_ticker):
 
 
 # ============================================================
-# MASTER COMBINED TECHNICAL ENGINE
+# MASTER TECHNICAL FUNCTION
 # (Not cached itself: it only does quick maths on cached downloads.)
 #
 # What happens when data is missing:
 #   - Daily prices fail        -> raises DataFetchError (the whole technical score fails)
-#   - Under 200 days of prices -> returns None (MISSING, shown as a dash)
-#   - 4H prices fail           -> the score uses the daily trend only, with a warning note
+#   - Under MA_SLOW days       -> returns None (MISSING, shown as a dash)
+#   - 4H prices fail           -> the score is NOT affected (it is daily only now).
+#                                 Only the 4H regime is "Unavailable", with a warning note.
 #   - Sector ETF fails         -> no sector adjustment is applied, with a warning note
 # ============================================================
-def calculate_technical_score(ticker_symbol, category_name=None):
+def calculate_technical_score(ticker_symbol):
     notes = []
 
-    daily_score, daily_details = calculate_daily_trend_score(ticker_symbol)
+    # --- JOB 1: trend score from the moving averages ---
+    trend_score, trend_details = calculate_trend_score(ticker_symbol)
 
-    # Not enough price history: there is no real score, so report it as missing
-    if daily_score is None:
-        return None, daily_details
+    if trend_score is None:
+        return None, trend_details
 
-    daily_direction = 1 if daily_score > 0 else (-1 if daily_score < 0 else 0)
+    direction = 1 if trend_score > 0 else (-1 if trend_score < 0 else 0)
 
-    four_h_available = True
+    # --- JOB 2a: daily regime ---
+    daily_regime, daily_mom, daily_pull, daily_row = get_daily_regime(ticker_symbol, direction)
+
+    # --- JOB 2b: 4H regime ---
     try:
         df4h = get_4h_indicators(ticker_symbol)
     except DataFetchError:
         df4h = None
-        four_h_available = False
-        notes.append("4H data unavailable (score uses the daily trend only)")
+        notes.append("4H data unavailable (4H regime not shown; the score is not affected)")
 
-    momentum_score = calculate_4h_momentum_score(df4h, daily_direction)
-    pullback_score = calculate_4h_pullback_score(df4h, daily_direction)
-
-    if not four_h_available:
-        four_h_score = 0
-        active_mode = "Unavailable"
-    elif abs(momentum_score) >= abs(pullback_score):
-        four_h_score = momentum_score
-        active_mode = "Momentum" if momentum_score != 0 else "Neutral"
+    if df4h is None:
+        h4_regime, h4_mom, h4_pull, h4_row = "Unavailable", 0, 0, None
     else:
-        four_h_score = pullback_score
-        active_mode = "Pullback"
+        h4_regime, h4_mom, h4_pull, h4_row = calculate_regime(df4h, direction)
 
-    if four_h_available:
-        core_score = (daily_score * 0.7) + (four_h_score * 0.3)
-    else:
-        core_score = daily_score
-
+    # --- Sector nudge (FIXED) ---
+    # "direction" flips the sign for a bearish stock, so:
+    #   strong sector + bullish stock -> score gets bigger (stronger bullish)
+    #   strong sector + bearish stock -> score gets smaller (weaker bearish)
+    #   weak sector   + bullish stock -> score gets smaller
+    #   weak sector   + bearish stock -> score gets bigger (stronger bearish)
     sector_category = TICKER_TRUE_SECTOR.get(ticker_symbol)
     sector_etf = SECTOR_ETF_MAPPING.get(sector_category) if sector_category else None
 
@@ -308,7 +380,7 @@ def calculate_technical_score(ticker_symbol, category_name=None):
     if sector_etf:
         try:
             sector_score, sector_details = calculate_sector_score(sector_etf)
-            sector_modifier = 1 + (sector_score / 100) * 0.15
+            sector_modifier = 1 + direction * (sector_score / 100) * SECTOR_INFLUENCE
             sector_label = f"{sector_modifier:.3f}"
         except DataFetchError:
             sector_details = {}
@@ -316,19 +388,30 @@ def calculate_technical_score(ticker_symbol, category_name=None):
             sector_label = "N/A (sector data unavailable)"
             notes.append("Sector ETF data unavailable (no sector adjustment applied)")
 
-    final_score = max(-100, min(100, core_score * sector_modifier))
+    final_score = max(-100, min(100, trend_score * sector_modifier))
 
+    # --- Details shown in the Deep Dive ---
     details = {
-        **daily_details,
-        "4H Trading Mode": active_mode,
-        "4H Momentum Score": round(momentum_score, 1),
-        "4H Pullback Score": round(pullback_score, 1),
-        "4H Trigger Component": round(four_h_score, 1),
+        **trend_details,
+        "Daily Regime": daily_regime,
+        "4H Regime": h4_regime,
+        "Combined Regime": get_combined_regime_label(direction, daily_regime, h4_regime),
+        "Trend Score (before sector)": round(trend_score, 1),
         "Sector Modifier": sector_label,
+        "Daily Momentum Strength": daily_mom,
+        "Daily Pullback Strength": daily_pull,
+        "4H Momentum Strength": h4_mom,
+        "4H Pullback Strength": h4_pull,
     }
+    if daily_row is not None:
+        details["Daily RSI (14)"] = round(daily_row['RSI_14'], 2)
+        details["Daily MACD Hist"] = round(daily_row['MACD_hist'], 4)
+    if h4_row is not None:
+        details["4H RSI (14)"] = round(h4_row['RSI_14'], 2)
+        details["4H MACD Hist"] = round(h4_row['MACD_hist'], 4)
     if sector_details:
         details.update(sector_details)
     if notes:
         details["⚠️ Data Notes"] = "; ".join(notes)
 
-    return max(-100, min(100, final_score)), details
+    return final_score, details
