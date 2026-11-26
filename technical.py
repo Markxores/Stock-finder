@@ -7,8 +7,10 @@ from yf_session import DataFetchError, get_ticker, get_daily_history, with_retry
 # HOW THIS FILE WORKS NOW (two separate jobs)
 #
 #   JOB 1 - TREND SCORE (feeds the Master Score)
-#     Daily chart only. Moving averages only. No RSI, no MACD.
+#     Daily chart only. Moving averages only (50 and 200 day). No RSI, no MACD.
+#     It measures HOW FAR the price is above/below each line, not just which side.
 #     Range: -100 to +100. Then nudged by the sector (see below).
+#     A score close to zero (inside the NEUTRAL ZONE) means "no clear trend".
 #
 #   JOB 2 - REGIME (a label for your eyes only, NOT in the score)
 #     Calculated twice: once on the daily chart, once on the 4H chart.
@@ -17,28 +19,43 @@ from yf_session import DataFetchError, get_ticker, get_daily_history, with_retry
 #     taken OUT of the score). The 4H regime uses the same logic.
 #
 #   Both regimes use the TREND SCORE to know which direction the
-#   stock is trending (up = +1, down = -1).
+#   stock is trending (up = +1, down = -1, no clear trend = 0).
 # ============================================================
 
 
 # ============================================================
 # SETTINGS YOU CAN TUNE
-# These are the numbers we will optimize later. Change them here
-# and nothing else in the file needs to change.
+# Change them here and nothing else in the file needs to change.
 # ============================================================
 
-# --- Trend score: the moving average lengths (in days) ---
-MA_FAST = 20      # fast exponential moving average (EMA)
-MA_MID = 50       # middle simple moving average (SMA)
-MA_SLOW = 200     # slow simple moving average (SMA)
+# --- Trend score: the two moving average lengths (in days, both simple averages) ---
+MA_MID = 50
+MA_SLOW = 200
 
-# --- Trend score: how many points each check is worth ---
-# Add them up: 20 + 20 + 20 + 40 = 100, so the score runs -100 to +100.
-# (Each check gives +points if true, -points if false.)
-POINTS_PRICE_VS_FAST = 20
-POINTS_PRICE_VS_MID = 20
-POINTS_PRICE_VS_SLOW = 20
-POINTS_PERFECT_ORDER = 40    # +40 if FAST > MID > SLOW, -40 if FAST < MID < SLOW, else 0
+# --- Trend score: three pieces, each measured as a distance ---
+#   piece 1: how far the PRICE is above/below the 50-day average
+#   piece 2: how far the PRICE is above/below the 200-day average
+#   piece 3: how far the 50-day average is above/below the 200-day average
+# Each distance is a % (0.10 = 10%). A "cap" is the distance that counts as
+# FULLY strong: 10% above the 50-day average gives piece 1 its full +1.
+# Further away than the cap adds nothing more. Each piece then runs -1 to +1.
+CAP_PRICE_VS_MID = 0.10
+CAP_PRICE_VS_SLOW = 0.20
+CAP_MID_VS_SLOW = 0.20
+
+# How much each piece counts (only the proportions matter: 2 + 4 + 4 = 10).
+# The 200-day average counts double the 50-day average for the price checks,
+# because it is the line most widely used to decide the trend direction.
+WEIGHT_PRICE_VS_MID = 2
+WEIGHT_PRICE_VS_SLOW = 4
+WEIGHT_MID_VS_SLOW = 4
+
+# --- Neutral zone ---
+# A trend score between -NEUTRAL_ZONE and +NEUTRAL_ZONE means "no clear trend".
+# The stock then has NO direction, and its regime reads Neutral.
+# This stops stocks sitting right on a moving average from flipping
+# between bullish and bearish every few days.
+NEUTRAL_ZONE = 10
 
 # --- Sector nudge ---
 # 0.15 means a perfect sector can change the score by up to 15% of the
@@ -59,7 +76,8 @@ AGAINST_TREND_NEUTRAL_AT = 60
 # THE FINAL REGIME LABEL (how the daily and 4H regimes combine)
 #
 # Rules, in this order (the first one that applies wins):
-#   1. No trend direction (trend score of exactly 0)  -> Neutral
+#   1. No trend direction (trend score inside the
+#      neutral zone)                                  -> Neutral
 #   2. Daily regime is Overextended                   -> Overextended
 #                                                       (the 4H is ignored)
 #   3. Daily and 4H are both Momentum                 -> Momentum
@@ -148,28 +166,43 @@ def calculate_trend_score(ticker_symbol):
     if len(df) < MA_SLOW:
         return None, {"⚠️ STATUS": "Insufficient History"}
 
-    ema_fast = df['Close'].ewm(span=MA_FAST, adjust=False).mean().iloc[-1]
     sma_mid = df['Close'].rolling(window=MA_MID).mean().iloc[-1]
     sma_slow = df['Close'].rolling(window=MA_SLOW).mean().iloc[-1]
     close = df['Close'].iloc[-1]
 
-    score = 0
-    score += POINTS_PRICE_VS_FAST if close > ema_fast else -POINTS_PRICE_VS_FAST
-    score += POINTS_PRICE_VS_MID if close > sma_mid else -POINTS_PRICE_VS_MID
-    score += POINTS_PRICE_VS_SLOW if close > sma_slow else -POINTS_PRICE_VS_SLOW
+    # The three distances, as fractions (0.05 = 5% above)
+    price_vs_mid = close / sma_mid - 1
+    price_vs_slow = close / sma_slow - 1
+    mid_vs_slow = sma_mid / sma_slow - 1
 
-    if ema_fast > sma_mid and sma_mid > sma_slow:
-        score += POINTS_PERFECT_ORDER
-    elif ema_fast < sma_mid and sma_mid < sma_slow:
-        score -= POINTS_PERFECT_ORDER
+    # Each one divided by its cap, then squeezed into -1 ... +1
+    piece_1 = max(-1.0, min(1.0, price_vs_mid / CAP_PRICE_VS_MID))
+    piece_2 = max(-1.0, min(1.0, price_vs_slow / CAP_PRICE_VS_SLOW))
+    piece_3 = max(-1.0, min(1.0, mid_vs_slow / CAP_MID_VS_SLOW))
+
+    total_weight = WEIGHT_PRICE_VS_MID + WEIGHT_PRICE_VS_SLOW + WEIGHT_MID_VS_SLOW
+    score = 100 * (WEIGHT_PRICE_VS_MID * piece_1
+                   + WEIGHT_PRICE_VS_SLOW * piece_2
+                   + WEIGHT_MID_VS_SLOW * piece_3) / total_weight
 
     details = {
         "Close Price": round(close, 4),
-        f"EMA {MA_FAST}": round(ema_fast, 4),
         f"SMA {MA_MID}": round(sma_mid, 4),
         f"SMA {MA_SLOW}": round(sma_slow, 4),
+        f"Price vs SMA {MA_MID}": f"{price_vs_mid * 100:+.1f}%",
+        f"Price vs SMA {MA_SLOW}": f"{price_vs_slow * 100:+.1f}%",
+        f"SMA {MA_MID} vs SMA {MA_SLOW}": f"{mid_vs_slow * 100:+.1f}%",
     }
-    return max(-100, min(100, score)), details
+    return max(-100.0, min(100.0, score)), details
+
+
+def get_trend_direction(trend_score):
+    """+1 (uptrend), -1 (downtrend) or 0 (inside the neutral zone = no clear trend)."""
+    if trend_score > NEUTRAL_ZONE:
+        return 1
+    if trend_score < -NEUTRAL_ZONE:
+        return -1
+    return 0
 
 
 # ============================================================
@@ -405,7 +438,8 @@ def calculate_technical_score(ticker_symbol):
     if trend_score is None:
         return None, trend_details
 
-    direction = 1 if trend_score > 0 else (-1 if trend_score < 0 else 0)
+    # +1 up, -1 down, 0 = inside the neutral zone (no clear trend)
+    direction = get_trend_direction(trend_score)
 
     # --- JOB 2a: daily regime ---
     daily_regime, daily_mom, daily_pull, daily_row = get_daily_regime(ticker_symbol, direction)
@@ -422,12 +456,14 @@ def calculate_technical_score(ticker_symbol):
     else:
         h4_regime, h4_mom, h4_pull, h4_row = calculate_regime(df4h, direction, is_daily=False)
 
-    # --- Sector nudge (FIXED) ---
-    # "direction" flips the sign for a bearish stock, so:
+    # --- Sector nudge ---
+    # It follows the SIGN of the trend score (not the neutral-zone direction),
+    # so the nudge changes smoothly and never jumps at the edge of the zone.
     #   strong sector + bullish stock -> score gets bigger (stronger bullish)
     #   strong sector + bearish stock -> score gets smaller (weaker bearish)
     #   weak sector   + bullish stock -> score gets smaller
     #   weak sector   + bearish stock -> score gets bigger (stronger bearish)
+    score_sign = 1 if trend_score > 0 else (-1 if trend_score < 0 else 0)
     sector_category = TICKER_TRUE_SECTOR.get(ticker_symbol)
     sector_etf = SECTOR_ETF_MAPPING.get(sector_category) if sector_category else None
 
@@ -438,7 +474,7 @@ def calculate_technical_score(ticker_symbol):
     if sector_etf:
         try:
             sector_score, sector_details = calculate_sector_score(sector_etf)
-            sector_modifier = 1 + direction * (sector_score / 100) * SECTOR_INFLUENCE
+            sector_modifier = 1 + score_sign * (sector_score / 100) * SECTOR_INFLUENCE
             sector_label = f"{sector_modifier:.3f}"
         except DataFetchError:
             sector_details = {}
@@ -452,8 +488,11 @@ def calculate_technical_score(ticker_symbol):
     regime_type, regime_text = get_combined_regime_label(direction, daily_regime, h4_regime)
 
     # --- Details shown in the Deep Dive ---
+    direction_text = {1: "Bullish", -1: "Bearish", 0: f"Neutral (score within ±{NEUTRAL_ZONE})"}[direction]
+
     details = {
         **trend_details,
+        "Trend Direction": direction_text,
         "Combined Regime": regime_text,
         "Regime Type": regime_type,
         "Daily Regime": daily_regime,
